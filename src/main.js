@@ -6,7 +6,7 @@ const SIZE = 24;
 const PIXEL_COUNT = SIZE * SIZE;
 const BATCH_SIZE = 4;
 const REVEAL_MS = 1260;
-const WAVE_LEAD_MS = 100;
+const SHADER_MS = 1350;
 const NOISE = 0.065;
 const RECENT_LIMIT = 64;
 const SYMMETRIES = ['vertical', 'horizontal'];
@@ -460,10 +460,12 @@ function startShaderBurst(element, sourceCanvas) {
   let buffer;
   let texture;
   let disposed = false;
+  let animationId = 0;
 
   const dispose = () => {
     if (disposed) return;
     disposed = true;
+    window.cancelAnimationFrame(animationId);
     if (buffer) gl.deleteBuffer(buffer);
     if (texture) gl.deleteTexture(texture);
     if (program) gl.deleteProgram(program);
@@ -554,7 +556,21 @@ function startShaderBurst(element, sourceCanvas) {
     }
   };
 
-  return { render, dispose };
+  const startedAt = performance.now();
+  const animate = (now) => {
+    if (disposed) return;
+    render(Math.min(1, (now - startedAt) / SHADER_MS));
+    if (disposed) return;
+    if (now - startedAt < SHADER_MS) {
+      animationId = window.requestAnimationFrame(animate);
+    } else {
+      dispose();
+    }
+  };
+
+  animationId = window.requestAnimationFrame(animate);
+
+  return { dispose };
 }
 
 function animateBatch(tiles, images) {
@@ -562,9 +578,6 @@ function animateBatch(tiles, images) {
     tile.image = tile.context.createImageData(SIZE, SIZE);
     return tile.image;
   });
-  let effects = [];
-  let effectsStarted = false;
-
   return new Promise((resolve) => {
     const start = performance.now();
 
@@ -574,8 +587,8 @@ function animateBatch(tiles, images) {
         tile.element.setAttribute('aria-label', 'Generated pixel pattern ' + (index + 1));
         tile.element.dataset.state = 'ready';
         tile.image = null;
+        startShaderBurst(tile.element, tile.output);
       });
-      effects.forEach((effect) => effect?.dispose());
       resolve();
     };
 
@@ -587,22 +600,6 @@ function animateBatch(tiles, images) {
         const count = Math.floor(progress * tile.revealOrder.length);
         drawFrame(tile, images[index], imageBuffers[index], count);
       });
-
-      const elapsed = performance.now() - start;
-      if (!effectsStarted && (reducedMotion.matches || elapsed >= REVEAL_MS - WAVE_LEAD_MS)) {
-        effects = reducedMotion.matches
-          ? []
-          : tiles.map((tile) => startShaderBurst(tile.element, tile.output));
-        effectsStarted = true;
-      }
-
-      if (effectsStarted && effects.length) {
-        const waveProgress = Math.min(
-          1,
-          Math.max(0, (elapsed - (REVEAL_MS - WAVE_LEAD_MS)) / WAVE_LEAD_MS),
-        );
-        effects.forEach((effect) => effect?.render(waveProgress));
-      }
 
       if (progress >= 1) return finish();
       window.setTimeout(frame, 16);
