@@ -9,6 +9,8 @@ const REVEAL_MS = 1260;
 const NOISE = 0.065;
 const RECENT_LIMIT = 64;
 const SYMMETRIES = ['vertical', 'horizontal'];
+const LOAD_MARGIN = 64;
+const INITIAL_BATCHES = window.matchMedia('(max-width: 640px)').matches ? 2 : 3;
 
 const terminalScroll = document.querySelector('#terminal-scroll');
 const feed = document.querySelector('#feed');
@@ -21,6 +23,8 @@ let latentBank;
 let loading = false;
 let blocked = false;
 let userHasScrolled = false;
+let loadArmed = true;
+let lastScrollTop = 0;
 let recentCodes = [];
 const recentCodeSet = new Set();
 
@@ -63,6 +67,9 @@ const symmetryOrders = {
   vertical: buildSymmetryOrder('vertical'),
   horizontal: buildSymmetryOrder('horizontal'),
 };
+
+const revealOrder = Array.from({ length: PIXEL_COUNT }, (_, position) => position)
+  .sort((a, b) => waveScore(a) - waveScore(b) || a - b);
 
 function assertResponse(response, path) {
   if (!response.ok) throw new Error('Unable to load ' + path + ' (' + response.status + ')');
@@ -193,8 +200,9 @@ function createTile(seed) {
     effectContext: effect.getContext('2d'),
     readout: readout.readout,
     readoutCode: readout.code,
+    seed,
     symmetry,
-    revealOrder: symmetryOrders[symmetry],
+    revealOrder,
     image: null,
     revealed: 0,
   };
@@ -213,7 +221,69 @@ function appendBatch() {
   return tiles;
 }
 
-function readPixels(logits, imageIndex, symmetry) {
+function isEdge(position) {
+  const x = position % SIZE;
+  const y = Math.floor(position / SIZE);
+  return x === 0 || x === SIZE - 1 || y === 0 || y === SIZE - 1;
+}
+
+const backgroundPairs = [
+  [[0, 0, 85], [0, 0, 170]],
+  [[85, 0, 0], [170, 0, 0]],
+  [[0, 85, 0], [0, 170, 0]],
+  [[85, 0, 85], [170, 0, 170]],
+  [[85, 85, 0], [170, 170, 0]],
+  [[0, 85, 85], [0, 170, 170]],
+  [[85, 85, 85], [170, 170, 170]],
+];
+
+function paletteIndex(colour) {
+  return modelInfo.palette.findIndex((candidate) => (
+    candidate[0] === colour[0]
+    && candidate[1] === colour[1]
+    && candidate[2] === colour[2]
+  ));
+}
+
+function densifyPixels(pixels, symmetry, seed) {
+  const result = pixels.slice();
+  const keepBlackFrame = seed % 4 === 0;
+  const counts = new Map();
+
+  pixels.forEach((colour) => {
+    if (colour !== 0) counts.set(colour, (counts.get(colour) || 0) + 1);
+  });
+
+  let dominant = 1;
+  let dominantCount = 0;
+  counts.forEach((count, colour) => {
+    if (count > dominantCount) {
+      dominant = colour;
+      dominantCount = count;
+    }
+  });
+
+  const dominantColour = modelInfo.palette[dominant] || [85, 85, 85];
+  const hue = dominantColour.indexOf(Math.max(...dominantColour));
+  const pair = backgroundPairs[(hue + seed) % backgroundPairs.length];
+  const base = Math.max(1, paletteIndex(pair[0]));
+  const accent = Math.max(1, paletteIndex(pair[1]));
+
+  symmetryOrders[symmetry].forEach(({ position, mirror }) => {
+    if (pixels[position] !== 0) return;
+    if (keepBlackFrame && isEdge(position)) return;
+    const x = position % SIZE;
+    const y = Math.floor(position / SIZE);
+    const threshold = bayer8[(y + seed) % 8][(x + seed * 3) % 8];
+    const colour = threshold < 8 ? accent : base;
+    result[position] = colour;
+    result[mirror] = result[position];
+  });
+
+  return result;
+}
+
+function readPixels(logits, imageIndex, symmetry, seed) {
   const pixels = new Uint8Array(PIXEL_COUNT);
   const imageOffset = imageIndex * modelInfo.palette.length * PIXEL_COUNT;
   symmetryOrders[symmetry].forEach(({ position, mirror }) => {
@@ -229,7 +299,7 @@ function readPixels(logits, imageIndex, symmetry) {
     pixels[position] = colour;
     pixels[mirror] = colour;
   });
-  return pixels;
+  return densifyPixels(pixels, symmetry, seed);
 }
 
 function writePixel(image, position, colour) {
@@ -242,12 +312,11 @@ function writePixel(image, position, colour) {
 
 function drawFrame(tile, pixels, image, count) {
   const start = tile.revealed;
-  const end = Math.min(count, tile.revealOrder.length);
+  const end = Math.min(count, PIXEL_COUNT);
   for (let index = start; index < end; index += 1) {
-    const { position, mirror } = tile.revealOrder[index];
+    const position = tile.revealOrder[index];
     const colour = modelInfo.palette[pixels[position]];
     writePixel(image, position, colour);
-    writePixel(image, mirror, colour);
   }
   if (end !== start) {
     tile.context.putImageData(image, 0, 0);
@@ -316,7 +385,12 @@ async function generatePatternBatch(tiles) {
     result = await session.run({ latent: latentTensor });
     return Array.from(
       { length: BATCH_SIZE },
-      (_, index) => readPixels(result.logits.data, index, tiles[index].symmetry),
+      (_, index) => readPixels(
+        result.logits.data,
+        index,
+        tiles[index].symmetry,
+        tiles[index].seed,
+      ),
     );
   } finally {
     if (latentTensor.dispose) latentTensor.dispose();
@@ -350,9 +424,20 @@ async function loadMore() {
 }
 
 async function fillInitialViewport() {
-  do {
+  for (let batch = 0; batch < INITIAL_BATCHES && !blocked; batch += 1) {
     await loadMore();
-  } while (!blocked && terminalScroll.scrollHeight <= terminalScroll.clientHeight + 1);
+  }
+}
+
+function isNearBottom() {
+  return terminalScroll.scrollTop + terminalScroll.clientHeight
+    >= terminalScroll.scrollHeight - LOAD_MARGIN;
+}
+
+function requestMore() {
+  if (!userHasScrolled || !loadArmed || loading || blocked || !isNearBottom()) return;
+  loadArmed = false;
+  loadMore();
 }
 
 async function loadModel() {
@@ -387,13 +472,25 @@ async function loadModel() {
 
 const observer = new IntersectionObserver(
   (entries) => {
-    if (userHasScrolled && entries.some((entry) => entry.isIntersecting)) loadMore();
+    if (entries.some((entry) => entry.isIntersecting)) requestMore();
   },
   { root: terminalScroll, rootMargin: '0px 0px 40px 0px' },
 );
 
 terminalScroll.addEventListener('scroll', () => {
-  if (terminalScroll.scrollTop > 0) userHasScrolled = true;
+  const nextScrollTop = terminalScroll.scrollTop;
+  const moved = Math.abs(nextScrollTop - lastScrollTop) > 0.5;
+  if (nextScrollTop > 0) userHasScrolled = true;
+  if (moved) loadArmed = true;
+  lastScrollTop = nextScrollTop;
+  if (moved) requestMore();
+}, { passive: true });
+
+terminalScroll.addEventListener('wheel', (event) => {
+  if (event.deltaY <= 0) return;
+  userHasScrolled = true;
+  loadArmed = true;
+  requestMore();
 }, { passive: true });
 
 observer.observe(sentinel);
