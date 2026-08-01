@@ -181,25 +181,28 @@ function animateBatch(tiles, images) {
 
   return new Promise((resolve) => {
     const start = performance.now();
-    const frame = (now) => {
-      const progress = reducedMotion.matches
-        ? 1
-        : Math.min(1, (now - start) / REVEAL_MS);
-      const count = Math.floor(progress * PIXEL_COUNT);
-      tiles.forEach((tile, index) => drawFrame(tile, images[index], imageBuffers[index], count));
 
-      if (progress < 1) {
-        requestAnimationFrame(frame);
-        return;
-      }
-
+    const finish = () => {
       tiles.forEach((tile, index) => {
         tile.skeleton.remove();
         tile.element.setAttribute('aria-label', 'Generated pixel pattern ' + (index + 1));
+        tile.image = null;
       });
       resolve();
     };
-    requestAnimationFrame(frame);
+
+    const frame = () => {
+      const progress = reducedMotion.matches
+        ? 1
+        : Math.min(1, (performance.now() - start) / REVEAL_MS);
+      const count = Math.floor(progress * PIXEL_COUNT);
+      tiles.forEach((tile, index) => drawFrame(tile, images[index], imageBuffers[index], count));
+
+      if (progress >= 1) return finish();
+      window.setTimeout(frame, 16);
+    };
+
+    frame();
   });
 }
 
@@ -252,7 +255,7 @@ async function loadMore() {
     showError(error);
   } finally {
     loading = false;
-    if (!blocked && isNearEnd()) requestAnimationFrame(() => loadMore());
+    if (!blocked && isNearEnd()) window.setTimeout(() => loadMore(), 0);
   }
 }
 
