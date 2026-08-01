@@ -6,10 +6,13 @@ const SIZE = 24;
 const PIXEL_COUNT = SIZE * SIZE;
 const BATCH_SIZE = 4;
 const REVEAL_MS = 1260;
+const SHADER_MS = 1350;
 const NOISE = 0.065;
 const RECENT_LIMIT = 64;
 const SYMMETRIES = ['vertical', 'horizontal'];
-const LOAD_MARGIN = 64;
+const BOTTOM_EPSILON = 3;
+const LOAD_INTENT_THRESHOLD = 140;
+const WHEEL_GESTURE_GAP = 180;
 const INITIAL_BATCHES = window.matchMedia('(max-width: 640px)').matches ? 2 : 3;
 
 const terminalScroll = document.querySelector('#terminal-scroll');
@@ -23,10 +26,111 @@ let latentBank;
 let loading = false;
 let blocked = false;
 let userHasScrolled = false;
-let loadArmed = true;
-let lastScrollTop = 0;
+let bottomIntent = 0;
+let bottomGestureReady = false;
+let lastWheelAt = 0;
+let lastTouchY = null;
 let recentCodes = [];
 const recentCodeSet = new Set();
+
+const shaderVertexSource = `
+  attribute vec2 position;
+  varying vec2 textureUv;
+
+  void main() {
+    textureUv = position * 0.5 + 0.5;
+    gl_Position = vec4(position, 0.0, 1.0);
+  }
+`;
+
+const shaderFragmentSource = `
+  precision highp float;
+
+  uniform sampler2D pattern;
+  uniform vec2 resolution;
+  uniform float progress;
+  varying vec2 textureUv;
+
+  float easeInOutCubic(float value) {
+    return value < 0.5
+      ? 4.0 * value * value * value
+      : 1.0 - pow(-2.0 * value + 2.0, 3.0) * 0.5;
+  }
+
+  float luminance(vec3 color) {
+    return dot(color, vec3(0.2126, 0.7152, 0.0722));
+  }
+
+  void main() {
+    vec2 uv = textureUv;
+    vec2 centered = uv - 0.5;
+    centered.x *= resolution.x / resolution.y;
+    float distanceFromCenter = length(centered) * 2.0;
+    vec2 direction = centered / max(length(centered), 0.001);
+
+    vec2 texel = vec2(1.0 / 24.0);
+    float height = luminance(texture2D(pattern, uv).rgb);
+    float heightLeft = luminance(texture2D(pattern, uv - vec2(texel.x, 0.0)).rgb);
+    float heightRight = luminance(texture2D(pattern, uv + vec2(texel.x, 0.0)).rgb);
+    float heightDown = luminance(texture2D(pattern, uv - vec2(0.0, texel.y)).rgb);
+    float heightUp = luminance(texture2D(pattern, uv + vec2(0.0, texel.y)).rgb);
+    vec2 reliefNormal = vec2(heightLeft - heightRight, heightDown - heightUp);
+    vec2 pixelCell = fract(uv * 24.0) - 0.5;
+    float pixelEdge = smoothstep(0.34, 0.49, max(abs(pixelCell.x), abs(pixelCell.y)));
+    float pixelRelief = height * 0.72 + (1.0 - pixelEdge) * 0.28;
+    vec2 pixelCenterUv = (floor(uv * 24.0) + 0.5) / 24.0;
+    vec2 pixelCentered = pixelCenterUv - 0.5;
+    pixelCentered.x *= resolution.x / resolution.y;
+    float pixelDistance = length(pixelCentered) * 2.0;
+
+    float eased = easeInOutCubic(progress);
+    float waveRadius = eased * 1.45;
+    float steppedDistance = mix(distanceFromCenter, pixelDistance, 0.62);
+    float waveDistance = steppedDistance - waveRadius
+      - (pixelRelief - 0.5) * 0.052;
+    float envelope = exp(-waveDistance * waveDistance * 320.0);
+    float innerRipple = sin(waveDistance * 92.0 - progress * 10.0);
+    float life = smoothstep(0.0, 0.07, progress)
+      * (1.0 - smoothstep(0.72, 1.0, progress));
+
+    vec2 refraction = (
+      direction * innerRipple * 0.035
+      + reliefNormal * (0.022 + pixelEdge * 0.014)
+    ) * envelope * life;
+    vec2 redShift = refraction * 1.28;
+    vec2 blueShift = refraction * 0.72;
+    float red = texture2D(pattern, uv + redShift).r;
+    float green = texture2D(pattern, uv + refraction).g;
+    float blue = texture2D(pattern, uv + blueShift).b;
+    vec3 color = vec3(red, green, blue);
+
+    float crest = exp(-waveDistance * waveDistance * 1050.0);
+    float caustic = envelope
+      * (0.5 + 0.5 * cos(waveDistance * 138.0 - progress * 16.0));
+    vec3 reliefVector = normalize(vec3(reliefNormal * 5.0, 0.72));
+    float reliefLight = clamp(
+      dot(reliefVector, normalize(vec3(-0.55, 0.65, 0.8))),
+      0.0,
+      1.0
+    );
+    float pixelSpecular = envelope
+      * (0.25 + reliefLight * 0.75)
+      * (0.45 + pixelEdge * 0.55);
+    float faceShade = (reliefLight - 0.42)
+      * envelope * (1.0 - pixelEdge) * 0.36;
+    color = clamp(
+      color + vec3(faceShade - pixelEdge * envelope * 0.055) * life,
+      0.0,
+      1.0
+    );
+    vec3 spectralLight = vec3(0.65, 0.94, 1.0)
+      * crest * (0.36 + pixelRelief * 0.42)
+      + vec3(0.28, 0.68, 1.0) * caustic * 0.14
+      + vec3(0.82, 0.98, 1.0) * pixelSpecular * 0.24;
+
+    gl_FragColor = vec4(color + spectralLight * life, 1.0);
+  }
+`;
 
 const bayer8 = [
   [0, 48, 12, 60, 3, 51, 15, 63],
@@ -173,8 +277,6 @@ function createTile(seed) {
 
   const symmetry = SYMMETRIES[seed % SYMMETRIES.length];
   element.dataset.symmetry = symmetry;
-  element.style.setProperty('--wave-delay', `${-((seed % 9) * 0.37).toFixed(2)}s`);
-  element.style.setProperty('--wave-angle', `${100 + (seed % 5) * 7}deg`);
 
   const skeleton = createCanvas('skeleton-canvas');
   const output = createCanvas('output-canvas');
@@ -194,6 +296,7 @@ function createTile(seed) {
     revealOrder: createRevealOrder(seed),
     image: null,
     revealed: 0,
+    effectStarted: false,
   };
 }
 
@@ -313,6 +416,132 @@ function drawFrame(tile, pixels, image, count) {
   }
 }
 
+function compileShader(gl, type, source) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    const message = gl.getShaderInfoLog(shader) || 'Unknown shader compile error';
+    gl.deleteShader(shader);
+    throw new Error(message);
+  }
+  return shader;
+}
+
+function startShaderBurst(element, sourceCanvas) {
+  if (reducedMotion.matches) return;
+
+  const canvas = createCanvas('shader-effect');
+  const bounds = element.getBoundingClientRect();
+  const scale = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.max(96, Math.round(bounds.width * scale));
+  canvas.height = Math.max(96, Math.round(bounds.height * scale));
+  element.append(canvas);
+
+  const gl = canvas.getContext('webgl', {
+    alpha: true,
+    antialias: false,
+    depth: false,
+    premultipliedAlpha: false,
+    preserveDrawingBuffer: false,
+  });
+  if (!gl) {
+    canvas.remove();
+    return;
+  }
+
+  let vertexShader;
+  let fragmentShader;
+  let program;
+  let buffer;
+  let texture;
+  let animationId = 0;
+
+  const dispose = () => {
+    window.cancelAnimationFrame(animationId);
+    if (buffer) gl.deleteBuffer(buffer);
+    if (texture) gl.deleteTexture(texture);
+    if (program) gl.deleteProgram(program);
+    if (vertexShader) gl.deleteShader(vertexShader);
+    if (fragmentShader) gl.deleteShader(fragmentShader);
+    canvas.remove();
+    delete element.dataset.effect;
+    const loseContext = gl.getExtension('WEBGL_lose_context');
+    if (loseContext) loseContext.loseContext();
+  };
+
+  try {
+    vertexShader = compileShader(gl, gl.VERTEX_SHADER, shaderVertexSource);
+    fragmentShader = compileShader(gl, gl.FRAGMENT_SHADER, shaderFragmentSource);
+    program = gl.createProgram();
+    gl.attachShader(program, vertexShader);
+    gl.attachShader(program, fragmentShader);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      throw new Error(gl.getProgramInfoLog(program) || 'Unknown shader link error');
+    }
+
+    buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
+      gl.STATIC_DRAW,
+    );
+
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.useProgram(program);
+    const position = gl.getAttribLocation(program, 'position');
+    gl.enableVertexAttribArray(position);
+    gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
+    gl.uniform2f(
+      gl.getUniformLocation(program, 'resolution'),
+      canvas.width,
+      canvas.height,
+    );
+    texture = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      sourceCanvas,
+    );
+    gl.uniform1i(gl.getUniformLocation(program, 'pattern'), 0);
+    gl.clearColor(0, 0, 0, 0);
+  } catch (error) {
+    console.warn('dither-feed: shader unavailable', error);
+    dispose();
+    return;
+  }
+
+  const progressLocation = gl.getUniformLocation(program, 'progress');
+  const startedAt = performance.now();
+  element.dataset.effect = 'active';
+
+  const render = (now) => {
+    const progress = Math.min(1, (now - startedAt) / SHADER_MS);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.uniform1f(progressLocation, progress);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    if (progress < 1) {
+      animationId = window.requestAnimationFrame(render);
+    } else {
+      dispose();
+    }
+  };
+
+  animationId = window.requestAnimationFrame(render);
+}
+
 function animateBatch(tiles, images) {
   const imageBuffers = tiles.map((tile) => {
     tile.image = tile.context.createImageData(SIZE, SIZE);
@@ -339,6 +568,10 @@ function animateBatch(tiles, images) {
       tiles.forEach((tile, index) => {
         const count = Math.floor(progress * tile.revealOrder.length);
         drawFrame(tile, images[index], imageBuffers[index], count);
+        if (count >= PIXEL_COUNT && !tile.effectStarted) {
+          tile.effectStarted = true;
+          startShaderBurst(tile.element, tile.output);
+        }
       });
 
       if (progress >= 1) return finish();
@@ -411,14 +644,21 @@ async function fillInitialViewport() {
   }
 }
 
-function isNearBottom() {
+function isAtBottom() {
   return terminalScroll.scrollTop + terminalScroll.clientHeight
-    >= terminalScroll.scrollHeight - LOAD_MARGIN;
+    >= terminalScroll.scrollHeight - BOTTOM_EPSILON;
 }
 
 function requestMore() {
-  if (!userHasScrolled || !loadArmed || loading || blocked || !isNearBottom()) return;
-  loadArmed = false;
+  if (
+    !userHasScrolled
+    || loading
+    || blocked
+    || !isAtBottom()
+    || bottomIntent < LOAD_INTENT_THRESHOLD
+  ) return;
+  bottomIntent = 0;
+  bottomGestureReady = false;
   loadMore();
 }
 
@@ -460,19 +700,61 @@ const observer = new IntersectionObserver(
 );
 
 terminalScroll.addEventListener('scroll', () => {
-  const nextScrollTop = terminalScroll.scrollTop;
-  const moved = Math.abs(nextScrollTop - lastScrollTop) > 0.5;
-  if (nextScrollTop > 0) userHasScrolled = true;
-  if (moved) loadArmed = true;
-  lastScrollTop = nextScrollTop;
-  if (moved) requestMore();
+  if (terminalScroll.scrollTop > 0) userHasScrolled = true;
+  if (!isAtBottom()) {
+    bottomIntent = 0;
+    bottomGestureReady = false;
+  }
 }, { passive: true });
 
 terminalScroll.addEventListener('wheel', (event) => {
-  if (event.deltaY <= 0) return;
+  const now = performance.now();
+  const freshGesture = now - lastWheelAt > WHEEL_GESTURE_GAP;
+  lastWheelAt = now;
+  if (event.deltaY <= 0) {
+    bottomIntent = 0;
+    bottomGestureReady = false;
+    return;
+  }
   userHasScrolled = true;
-  loadArmed = true;
+  if (loading || !isAtBottom()) {
+    bottomIntent = 0;
+    bottomGestureReady = false;
+    return;
+  }
+  if (!bottomGestureReady) {
+    if (!freshGesture) return;
+    bottomGestureReady = true;
+  }
+  bottomIntent += Math.min(event.deltaY, 50);
   requestMore();
+}, { passive: true });
+
+terminalScroll.addEventListener('touchstart', (event) => {
+  lastTouchY = event.touches[0] ? event.touches[0].clientY : null;
+  bottomIntent = 0;
+  bottomGestureReady = !loading && isAtBottom();
+}, { passive: true });
+
+terminalScroll.addEventListener('touchmove', (event) => {
+  if (lastTouchY === null || !event.touches[0]) return;
+  const nextTouchY = event.touches[0].clientY;
+  const delta = lastTouchY - nextTouchY;
+  lastTouchY = nextTouchY;
+  if (delta <= 0 || loading || !isAtBottom()) {
+    bottomIntent = 0;
+    bottomGestureReady = false;
+    return;
+  }
+  if (!bottomGestureReady) return;
+  userHasScrolled = true;
+  bottomIntent += Math.min(delta, 50);
+  requestMore();
+}, { passive: true });
+
+terminalScroll.addEventListener('touchend', () => {
+  lastTouchY = null;
+  bottomGestureReady = false;
 }, { passive: true });
 
 observer.observe(sentinel);

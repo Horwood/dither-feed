@@ -99,54 +99,6 @@ body {
   image-rendering: pixelated;
 }
 
-.pattern-tile::after {
-  position: absolute;
-  inset: -36%;
-  z-index: 2;
-  content: '';
-  pointer-events: none;
-  opacity: 0;
-  background:
-    radial-gradient(
-      ellipse at center,
-      rgb(218 255 247 / 28%) 0 5%,
-      rgb(79 205 255 / 13%) 14%,
-      transparent 39%
-    ),
-    linear-gradient(
-      var(--wave-angle),
-      transparent 36%,
-      rgb(172 255 235 / 5%) 43%,
-      rgb(223 255 249 / 22%) 49%,
-      rgb(83 207 255 / 10%) 54%,
-      transparent 63%
-    );
-  mix-blend-mode: screen;
-  filter: blur(2px);
-  transform: translate3d(-82%, 25%, 0) rotate(-5deg) scaleX(.82);
-  will-change: transform, opacity;
-}
-
-.pattern-tile[data-state="ready"]::after {
-  opacity: .76;
-  animation: glass-wave 5.4s cubic-bezier(.42, 0, .58, 1) var(--wave-delay) infinite;
-}
-
-@keyframes glass-wave {
-  0%,
-  24% {
-    transform: translate3d(-82%, 25%, 0) rotate(-5deg) scaleX(.82);
-  }
-
-  68% {
-    transform: translate3d(58%, -13%, 0) rotate(-5deg) scaleX(1.08);
-  }
-
-  100% {
-    transform: translate3d(82%, -22%, 0) rotate(-5deg) scaleX(.9);
-  }
-}
-
 .pattern-tile canvas {
   position: absolute;
   inset: 0;
@@ -158,6 +110,11 @@ body {
 
 .pattern-tile .skeleton-canvas { z-index: 0; }
 .pattern-tile .output-canvas { z-index: 1; }
+.pattern-tile .shader-effect {
+  z-index: 2;
+  pointer-events: none;
+  image-rendering: auto;
+}
 
 .tile-readout {
   position: absolute;
@@ -251,8 +208,4 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .terminal-cursor { animation: none; }
   .terminal-scroll { scroll-behavior: auto; }
-  .pattern-tile[data-state="ready"]::after {
-    opacity: 0;
-    animation: none;
-  }
 }
