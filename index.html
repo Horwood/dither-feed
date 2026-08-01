@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#111111" />
+    <title>dither-feed</title>
+  </head>
+  <body>
+    <main class="desktop">
+      <section class="terminal-window" aria-label="dither-feed terminal">
+        <header class="terminal-bar">
+          <div class="traffic-lights" aria-hidden="true"><i></i><i></i><i></i></div>
+          <span class="terminal-title">dither-feed</span>
+        </header>
+        <div id="terminal-scroll" class="terminal-scroll">
+          <div id="feed" class="feed" aria-label="Generated pixel patterns"></div>
+          <div id="feed-sentinel" class="feed-sentinel" aria-hidden="true"></div>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
