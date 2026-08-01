@@ -6,12 +6,12 @@ const SIZE = 24;
 const PIXEL_COUNT = SIZE * SIZE;
 const BATCH_SIZE = 4;
 const REVEAL_MS = 1260;
+const WAVE_LEAD_MS = 100;
 const NOISE = 0.065;
 const RECENT_LIMIT = 64;
 const SYMMETRIES = ['vertical', 'horizontal'];
 const BOTTOM_EPSILON = 3;
-const LOAD_INTENT_THRESHOLD = 140;
-const WHEEL_GESTURE_GAP = 180;
+const LOAD_INTENT_THRESHOLD = 220;
 const INITIAL_BATCHES = window.matchMedia('(max-width: 640px)').matches ? 2 : 3;
 
 const terminalScroll = document.querySelector('#terminal-scroll');
@@ -26,8 +26,6 @@ let loading = false;
 let blocked = false;
 let userHasScrolled = false;
 let bottomIntent = 0;
-let bottomGestureReady = false;
-let lastWheelAt = 0;
 let lastTouchY = null;
 let recentCodes = [];
 const recentCodeSet = new Set();
@@ -461,8 +459,11 @@ function startShaderBurst(element, sourceCanvas) {
   let program;
   let buffer;
   let texture;
+  let disposed = false;
 
   const dispose = () => {
+    if (disposed) return;
+    disposed = true;
     if (buffer) gl.deleteBuffer(buffer);
     if (texture) gl.deleteTexture(texture);
     if (program) gl.deleteProgram(program);
@@ -531,20 +532,26 @@ function startShaderBurst(element, sourceCanvas) {
   element.dataset.effect = 'active';
 
   const render = (progress) => {
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texSubImage2D(
-      gl.TEXTURE_2D,
-      0,
-      0,
-      0,
-      gl.RGBA,
-      gl.UNSIGNED_BYTE,
-      sourceCanvas,
-    );
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.uniform1f(progressLocation, progress);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    if (disposed) return;
+    try {
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texSubImage2D(
+        gl.TEXTURE_2D,
+        0,
+        0,
+        0,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        sourceCanvas,
+      );
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.uniform1f(progressLocation, progress);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    } catch (error) {
+      console.warn('dither-feed: shader frame skipped', error);
+      dispose();
+    }
   };
 
   return { render, dispose };
@@ -555,7 +562,8 @@ function animateBatch(tiles, images) {
     tile.image = tile.context.createImageData(SIZE, SIZE);
     return tile.image;
   });
-  const effects = tiles.map((tile) => startShaderBurst(tile.element, tile.output));
+  let effects = [];
+  let effectsStarted = false;
 
   return new Promise((resolve) => {
     const start = performance.now();
@@ -578,8 +586,23 @@ function animateBatch(tiles, images) {
       tiles.forEach((tile, index) => {
         const count = Math.floor(progress * tile.revealOrder.length);
         drawFrame(tile, images[index], imageBuffers[index], count);
-        effects[index]?.render(progress);
       });
+
+      const elapsed = performance.now() - start;
+      if (!effectsStarted && (reducedMotion.matches || elapsed >= REVEAL_MS - WAVE_LEAD_MS)) {
+        effects = reducedMotion.matches
+          ? []
+          : tiles.map((tile) => startShaderBurst(tile.element, tile.output));
+        effectsStarted = true;
+      }
+
+      if (effectsStarted && effects.length) {
+        const waveProgress = Math.min(
+          1,
+          Math.max(0, (elapsed - (REVEAL_MS - WAVE_LEAD_MS)) / WAVE_LEAD_MS),
+        );
+        effects.forEach((effect) => effect?.render(waveProgress));
+      }
 
       if (progress >= 1) return finish();
       window.setTimeout(frame, 16);
@@ -665,7 +688,6 @@ function requestMore() {
     || bottomIntent < LOAD_INTENT_THRESHOLD
   ) return;
   bottomIntent = 0;
-  bottomGestureReady = false;
   loadMore();
 }
 
@@ -710,37 +732,26 @@ terminalScroll.addEventListener('scroll', () => {
   if (terminalScroll.scrollTop > 0) userHasScrolled = true;
   if (!isAtBottom()) {
     bottomIntent = 0;
-    bottomGestureReady = false;
   }
 }, { passive: true });
 
 terminalScroll.addEventListener('wheel', (event) => {
-  const now = performance.now();
-  const freshGesture = now - lastWheelAt > WHEEL_GESTURE_GAP;
-  lastWheelAt = now;
   if (event.deltaY <= 0) {
     bottomIntent = 0;
-    bottomGestureReady = false;
     return;
   }
   userHasScrolled = true;
   if (loading || !isAtBottom()) {
     bottomIntent = 0;
-    bottomGestureReady = false;
     return;
   }
-  if (!bottomGestureReady) {
-    if (!freshGesture) return;
-    bottomGestureReady = true;
-  }
-  bottomIntent += Math.min(event.deltaY, 50);
+  bottomIntent += Math.min(event.deltaY, 80);
   requestMore();
 }, { passive: true });
 
 terminalScroll.addEventListener('touchstart', (event) => {
   lastTouchY = event.touches[0] ? event.touches[0].clientY : null;
   bottomIntent = 0;
-  bottomGestureReady = !loading && isAtBottom();
 }, { passive: true });
 
 terminalScroll.addEventListener('touchmove', (event) => {
@@ -750,18 +761,16 @@ terminalScroll.addEventListener('touchmove', (event) => {
   lastTouchY = nextTouchY;
   if (delta <= 0 || loading || !isAtBottom()) {
     bottomIntent = 0;
-    bottomGestureReady = false;
     return;
   }
-  if (!bottomGestureReady) return;
   userHasScrolled = true;
-  bottomIntent += Math.min(delta, 50);
+  bottomIntent += Math.min(delta, 80);
   requestMore();
 }, { passive: true });
 
 terminalScroll.addEventListener('touchend', () => {
   lastTouchY = null;
-  bottomGestureReady = false;
+  bottomIntent = 0;
 }, { passive: true });
 
 observer.observe(sentinel);
