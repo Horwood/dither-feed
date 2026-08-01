@@ -6,7 +6,6 @@ const SIZE = 24;
 const PIXEL_COUNT = SIZE * SIZE;
 const BATCH_SIZE = 4;
 const REVEAL_MS = 1260;
-const SHADER_MS = 1350;
 const NOISE = 0.065;
 const RECENT_LIMIT = 64;
 const SYMMETRIES = ['vertical', 'horizontal'];
@@ -88,23 +87,28 @@ const shaderFragmentSource = `
     float steppedDistance = mix(distanceFromCenter, pixelDistance, 0.62);
     float waveDistance = steppedDistance - waveRadius
       - (pixelRelief - 0.5) * 0.052;
-    float envelope = exp(-waveDistance * waveDistance * 320.0);
+    float envelope = exp(-waveDistance * waveDistance * 155.0);
+    float wake = exp(-waveDistance * waveDistance * 58.0);
     float innerRipple = sin(waveDistance * 92.0 - progress * 10.0);
     float life = smoothstep(0.0, 0.07, progress)
       * (1.0 - smoothstep(0.72, 1.0, progress));
 
     vec2 refraction = (
-      direction * innerRipple * 0.035
-      + reliefNormal * (0.022 + pixelEdge * 0.014)
-    ) * envelope * life;
-    vec2 redShift = refraction * 1.28;
-    vec2 blueShift = refraction * 0.72;
+      direction * (
+        innerRipple * 0.064
+        + sin(waveDistance * 38.0 - progress * 7.0) * 0.024
+      )
+      + reliefNormal * (0.048 + pixelEdge * 0.026)
+    ) * (envelope * 0.82 + wake * 0.18) * life;
+    vec2 redShift = refraction * 1.72;
+    vec2 blueShift = refraction * 0.38;
+    vec4 baseSample = texture2D(pattern, uv);
     float red = texture2D(pattern, uv + redShift).r;
     float green = texture2D(pattern, uv + refraction).g;
     float blue = texture2D(pattern, uv + blueShift).b;
     vec3 color = vec3(red, green, blue);
 
-    float crest = exp(-waveDistance * waveDistance * 1050.0);
+    float crest = exp(-waveDistance * waveDistance * 620.0);
     float caustic = envelope
       * (0.5 + 0.5 * cos(waveDistance * 138.0 - progress * 16.0));
     vec3 reliefVector = normalize(vec3(reliefNormal * 5.0, 0.72));
@@ -125,10 +129,13 @@ const shaderFragmentSource = `
     );
     vec3 spectralLight = vec3(0.65, 0.94, 1.0)
       * crest * (0.36 + pixelRelief * 0.42)
-      + vec3(0.28, 0.68, 1.0) * caustic * 0.14
-      + vec3(0.82, 0.98, 1.0) * pixelSpecular * 0.24;
+      + vec3(0.28, 0.68, 1.0) * caustic * 0.22
+      + vec3(0.82, 0.98, 1.0) * pixelSpecular * 0.34;
 
-    gl_FragColor = vec4(color + spectralLight * life, 1.0);
+    gl_FragColor = vec4(
+      color + spectralLight * life * baseSample.a,
+      baseSample.a
+    );
   }
 `;
 
@@ -296,7 +303,6 @@ function createTile(seed) {
     revealOrder: createRevealOrder(seed),
     image: null,
     revealed: 0,
-    effectStarted: false,
   };
 }
 
@@ -455,10 +461,8 @@ function startShaderBurst(element, sourceCanvas) {
   let program;
   let buffer;
   let texture;
-  let animationId = 0;
 
   const dispose = () => {
-    window.cancelAnimationFrame(animationId);
     if (buffer) gl.deleteBuffer(buffer);
     if (texture) gl.deleteTexture(texture);
     if (program) gl.deleteProgram(program);
@@ -524,22 +528,26 @@ function startShaderBurst(element, sourceCanvas) {
   }
 
   const progressLocation = gl.getUniformLocation(program, 'progress');
-  const startedAt = performance.now();
   element.dataset.effect = 'active';
 
-  const render = (now) => {
-    const progress = Math.min(1, (now - startedAt) / SHADER_MS);
+  const render = (progress) => {
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texSubImage2D(
+      gl.TEXTURE_2D,
+      0,
+      0,
+      0,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      sourceCanvas,
+    );
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.uniform1f(progressLocation, progress);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    if (progress < 1) {
-      animationId = window.requestAnimationFrame(render);
-    } else {
-      dispose();
-    }
   };
 
-  animationId = window.requestAnimationFrame(render);
+  return { render, dispose };
 }
 
 function animateBatch(tiles, images) {
@@ -547,6 +555,7 @@ function animateBatch(tiles, images) {
     tile.image = tile.context.createImageData(SIZE, SIZE);
     return tile.image;
   });
+  const effects = tiles.map((tile) => startShaderBurst(tile.element, tile.output));
 
   return new Promise((resolve) => {
     const start = performance.now();
@@ -558,6 +567,7 @@ function animateBatch(tiles, images) {
         tile.element.dataset.state = 'ready';
         tile.image = null;
       });
+      effects.forEach((effect) => effect?.dispose());
       resolve();
     };
 
@@ -568,10 +578,7 @@ function animateBatch(tiles, images) {
       tiles.forEach((tile, index) => {
         const count = Math.floor(progress * tile.revealOrder.length);
         drawFrame(tile, images[index], imageBuffers[index], count);
-        if (count >= PIXEL_COUNT && !tile.effectStarted) {
-          tile.effectStarted = true;
-          startShaderBurst(tile.element, tile.output);
-        }
+        effects[index]?.render(progress);
       });
 
       if (progress >= 1) return finish();
