@@ -108,8 +108,90 @@ body {
   image-rendering: pixelated;
 }
 
-.pattern-tile canvas:last-child { z-index: 1; }
+.pattern-tile .skeleton-canvas { z-index: 0; }
+.pattern-tile .output-canvas { z-index: 1; }
+.pattern-tile .bayer-effect {
+  z-index: 2;
+  opacity: .62;
+  mix-blend-mode: screen;
+}
+
+.tile-readout {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  left: 6px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 7px;
+  padding: 6px 7px;
+  border: 1px solid rgb(158 230 173 / 45%);
+  background: linear-gradient(90deg, rgb(4 12 7 / 95%), rgb(4 12 7 / 82%));
+  color: #d8f4dc;
+  font-size: 9px;
+  line-height: 1;
+  letter-spacing: .08em;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(6px);
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.tile-readout::before {
+  width: 12px;
+  height: 8px;
+  flex: 0 0 auto;
+  content: '';
+  background: repeating-linear-gradient(
+    90deg,
+    #9ee6ad 0 1px,
+    transparent 1px 3px
+  );
+  opacity: .8;
+}
+
+.tile-readout::after {
+  width: 26px;
+  height: 8px;
+  margin-left: auto;
+  flex: 0 0 auto;
+  content: '';
+  background: repeating-linear-gradient(
+    90deg,
+    #9ee6ad 0 1px,
+    transparent 1px 4px
+  );
+  opacity: .55;
+}
+
+.tile-readout-item {
+  white-space: nowrap;
+}
+
+.pattern-tile:hover .tile-readout,
+.pattern-tile:focus-visible .tile-readout {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.pattern-tile:focus-visible {
+  outline: 1px solid #9ee6ad;
+  outline-offset: -1px;
+}
+
+.pattern-tile[data-state="generating"] .tile-readout {
+  border-color: rgb(158 230 173 / 28%);
+  color: #a9c7ad;
+}
+
 .feed-sentinel { width: 100%; height: 1px; }
+
+/* The Bayer mask is painted into the temporary canvas by the reveal loop. */
+.bayer-effect {
+  pointer-events: none;
+}
 
 .error-line {
   grid-column: 1 / -1;

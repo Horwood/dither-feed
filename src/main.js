@@ -5,10 +5,10 @@ import './style.css';
 const SIZE = 24;
 const PIXEL_COUNT = SIZE * SIZE;
 const BATCH_SIZE = 4;
-const REVEAL_MS = 900;
+const REVEAL_MS = 1260;
 const NOISE = 0.065;
 const RECENT_LIMIT = 64;
-const INITIAL_FILL = 1.5;
+const SYMMETRIES = ['vertical', 'horizontal'];
 
 const terminalScroll = document.querySelector('#terminal-scroll');
 const feed = document.querySelector('#feed');
@@ -20,6 +20,7 @@ let modelInfo;
 let latentBank;
 let loading = false;
 let blocked = false;
+let userHasScrolled = false;
 let recentCodes = [];
 const recentCodeSet = new Set();
 
@@ -34,16 +35,34 @@ const bayer8 = [
   [42, 26, 38, 22, 41, 25, 37, 21],
 ];
 
-const revealOrder = Array.from({ length: PIXEL_COUNT }, (_, position) => position)
-  .sort((a, b) => {
-    const ax = a % SIZE;
-    const ay = Math.floor(a / SIZE);
-    const bx = b % SIZE;
-    const by = Math.floor(b / SIZE);
-    const aScore = ax + ay + bayer8[ay % 8][ax % 8] / 64;
-    const bScore = bx + by + bayer8[by % 8][bx % 8] / 64;
-    return aScore - bScore || a - b;
-  });
+function waveScore(position) {
+  const x = position % SIZE;
+  const y = Math.floor(position / SIZE);
+  return x + y + bayer8[y % 8][x % 8] / 64;
+}
+
+function buildSymmetryOrder(symmetry) {
+  return Array.from({ length: PIXEL_COUNT }, (_, position) => {
+    const x = position % SIZE;
+    const y = Math.floor(position / SIZE);
+    const mirror = symmetry === 'vertical'
+      ? y * SIZE + (SIZE - 1 - x)
+      : (SIZE - 1 - y) * SIZE + x;
+    if (position > mirror) return null;
+    return {
+      position,
+      mirror,
+      score: Math.min(waveScore(position), waveScore(mirror)),
+    };
+  })
+    .filter(Boolean)
+    .sort((a, b) => a.score - b.score || a.position - b.position);
+}
+
+const symmetryOrders = {
+  vertical: buildSymmetryOrder('vertical'),
+  horizontal: buildSymmetryOrder('horizontal'),
+};
 
 function assertResponse(response, path) {
   if (!response.ok) throw new Error('Unable to load ' + path + ' (' + response.status + ')');
@@ -75,10 +94,11 @@ function chooseCode() {
   return code;
 }
 
-function createCanvas() {
+function createCanvas(className) {
   const canvas = document.createElement('canvas');
   canvas.width = SIZE;
   canvas.height = SIZE;
+  if (className) canvas.className = className;
   canvas.setAttribute('aria-hidden', 'true');
   return canvas;
 }
@@ -100,22 +120,81 @@ function drawSkeleton(canvas, seed) {
   context.putImageData(image, 0, 0);
 }
 
+function drawBayerFrame(tile, phase) {
+  const image = tile.effectContext.createImageData(SIZE, SIZE);
+  const level = (phase + 1) * 8;
+  for (let position = 0; position < PIXEL_COUNT; position += 1) {
+    const x = position % SIZE;
+    const y = Math.floor(position / SIZE);
+    const threshold = bayer8[(y + phase) % 8][(x + phase * 3) % 8];
+    if (threshold >= level) continue;
+    const offset = position * 4;
+    const alpha = 24 + Math.round((level - threshold) * 0.7);
+    image.data[offset] = 158;
+    image.data[offset + 1] = 230;
+    image.data[offset + 2] = 173;
+    image.data[offset + 3] = alpha;
+  }
+  tile.effectContext.putImageData(image, 0, 0);
+}
+
+function createReadout(seed, symmetry) {
+  const readout = document.createElement('div');
+  readout.className = 'tile-readout';
+  readout.setAttribute('aria-hidden', 'true');
+
+  const entries = [
+    ['ID', String(seed).padStart(4, '0')],
+    ['PX', '24×24'],
+    ['SYM', symmetry === 'vertical' ? 'V' : 'H'],
+    ['PAL', '64'],
+    ['BYR', '8×8'],
+  ];
+
+  entries.forEach(([label, value]) => {
+    const item = document.createElement('span');
+    item.className = 'tile-readout-item';
+    item.textContent = label + ' ' + value;
+    readout.append(item);
+  });
+
+  const code = document.createElement('span');
+  code.className = 'tile-readout-item tile-readout-code';
+  code.textContent = 'LAT ---';
+  readout.append(code);
+
+  return { readout, code };
+}
+
 function createTile(seed) {
   const element = document.createElement('div');
   element.className = 'pattern-tile';
   element.setAttribute('role', 'img');
+  element.setAttribute('tabindex', '0');
   element.setAttribute('aria-label', 'Generating pixel pattern');
+  element.dataset.state = 'generating';
 
-  const skeleton = createCanvas();
-  const output = createCanvas();
+  const symmetry = SYMMETRIES[seed % SYMMETRIES.length];
+  element.dataset.symmetry = symmetry;
+
+  const skeleton = createCanvas('skeleton-canvas');
+  const output = createCanvas('output-canvas');
+  const effect = createCanvas('bayer-effect');
+  const readout = createReadout(seed, symmetry);
   drawSkeleton(skeleton, seed);
-  element.append(skeleton, output);
+  element.append(skeleton, output, effect, readout.readout);
 
   return {
     element,
     skeleton,
     output,
+    effect,
     context: output.getContext('2d'),
+    effectContext: effect.getContext('2d'),
+    readout: readout.readout,
+    readoutCode: readout.code,
+    symmetry,
+    revealOrder: symmetryOrders[symmetry],
     image: null,
     revealed: 0,
   };
@@ -134,10 +213,10 @@ function appendBatch() {
   return tiles;
 }
 
-function readPixels(logits, imageIndex) {
+function readPixels(logits, imageIndex, symmetry) {
   const pixels = new Uint8Array(PIXEL_COUNT);
   const imageOffset = imageIndex * modelInfo.palette.length * PIXEL_COUNT;
-  for (let position = 0; position < PIXEL_COUNT; position += 1) {
+  symmetryOrders[symmetry].forEach(({ position, mirror }) => {
     let colour = 0;
     let score = -Infinity;
     for (let candidate = 0; candidate < modelInfo.palette.length; candidate += 1) {
@@ -148,7 +227,8 @@ function readPixels(logits, imageIndex) {
       }
     }
     pixels[position] = colour;
-  }
+    pixels[mirror] = colour;
+  });
   return pixels;
 }
 
@@ -162,10 +242,12 @@ function writePixel(image, position, colour) {
 
 function drawFrame(tile, pixels, image, count) {
   const start = tile.revealed;
-  const end = Math.min(count, PIXEL_COUNT);
+  const end = Math.min(count, tile.revealOrder.length);
   for (let index = start; index < end; index += 1) {
-    const position = revealOrder[index];
-    writePixel(image, position, modelInfo.palette[pixels[position]]);
+    const { position, mirror } = tile.revealOrder[index];
+    const colour = modelInfo.palette[pixels[position]];
+    writePixel(image, position, colour);
+    writePixel(image, mirror, colour);
   }
   if (end !== start) {
     tile.context.putImageData(image, 0, 0);
@@ -181,11 +263,14 @@ function animateBatch(tiles, images) {
 
   return new Promise((resolve) => {
     const start = performance.now();
+    let lastBayerPhase = -1;
 
     const finish = () => {
       tiles.forEach((tile, index) => {
         tile.skeleton.remove();
+        tile.effect.remove();
         tile.element.setAttribute('aria-label', 'Generated pixel pattern ' + (index + 1));
+        tile.element.dataset.state = 'ready';
         tile.image = null;
       });
       resolve();
@@ -195,8 +280,15 @@ function animateBatch(tiles, images) {
       const progress = reducedMotion.matches
         ? 1
         : Math.min(1, (performance.now() - start) / REVEAL_MS);
-      const count = Math.floor(progress * PIXEL_COUNT);
-      tiles.forEach((tile, index) => drawFrame(tile, images[index], imageBuffers[index], count));
+      const bayerPhase = Math.floor((performance.now() - start) / 105) % 8;
+      if (!reducedMotion.matches && bayerPhase !== lastBayerPhase) {
+        tiles.forEach((tile) => drawBayerFrame(tile, bayerPhase));
+        lastBayerPhase = bayerPhase;
+      }
+      tiles.forEach((tile, index) => {
+        const count = Math.floor(progress * tile.revealOrder.length);
+        drawFrame(tile, images[index], imageBuffers[index], count);
+      });
 
       if (progress >= 1) return finish();
       window.setTimeout(frame, 16);
@@ -206,10 +298,11 @@ function animateBatch(tiles, images) {
   });
 }
 
-async function generatePatternBatch() {
+async function generatePatternBatch(tiles) {
   const latent = new Float32Array(BATCH_SIZE * modelInfo.latent);
   for (let index = 0; index < BATCH_SIZE; index += 1) {
     const code = chooseCode();
+    tiles[index].readoutCode.textContent = 'LAT ' + code.toString(16).toUpperCase().padStart(3, '0');
     const offset = code * modelInfo.latent;
     const targetOffset = index * modelInfo.latent;
     for (let dimension = 0; dimension < modelInfo.latent; dimension += 1) {
@@ -221,7 +314,10 @@ async function generatePatternBatch() {
   let result;
   try {
     result = await session.run({ latent: latentTensor });
-    return Array.from({ length: BATCH_SIZE }, (_, index) => readPixels(result.logits.data, index));
+    return Array.from(
+      { length: BATCH_SIZE },
+      (_, index) => readPixels(result.logits.data, index, tiles[index].symmetry),
+    );
   } finally {
     if (latentTensor.dispose) latentTensor.dispose();
     if (result && result.logits && result.logits.dispose) result.logits.dispose();
@@ -238,31 +334,25 @@ function showError(error) {
   feed.append(line);
 }
 
-function isNearEnd() {
-  return terminalScroll.scrollTop + terminalScroll.clientHeight
-    >= terminalScroll.scrollHeight - terminalScroll.clientHeight * INITIAL_FILL;
-}
-
 async function loadMore() {
   if (loading || blocked || !session) return;
   loading = true;
   const tiles = appendBatch();
   try {
-    const images = await generatePatternBatch();
+    const images = await generatePatternBatch(tiles);
     await animateBatch(tiles, images);
   } catch (error) {
     tiles.forEach((tile) => tile.element.remove());
     showError(error);
   } finally {
     loading = false;
-    if (!blocked && isNearEnd()) window.setTimeout(() => loadMore(), 0);
   }
 }
 
 async function fillInitialViewport() {
   do {
     await loadMore();
-  } while (!blocked && terminalScroll.scrollHeight <= terminalScroll.clientHeight * 2);
+  } while (!blocked && terminalScroll.scrollHeight <= terminalScroll.clientHeight + 1);
 }
 
 async function loadModel() {
@@ -297,10 +387,14 @@ async function loadModel() {
 
 const observer = new IntersectionObserver(
   (entries) => {
-    if (entries.some((entry) => entry.isIntersecting)) loadMore();
+    if (userHasScrolled && entries.some((entry) => entry.isIntersecting)) loadMore();
   },
-  { root: terminalScroll, rootMargin: '120% 0px' },
+  { root: terminalScroll, rootMargin: '0px 0px 40px 0px' },
 );
+
+terminalScroll.addEventListener('scroll', () => {
+  if (terminalScroll.scrollTop > 0) userHasScrolled = true;
+}, { passive: true });
 
 observer.observe(sentinel);
 
