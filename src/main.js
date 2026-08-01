@@ -68,8 +68,16 @@ const symmetryOrders = {
   horizontal: buildSymmetryOrder('horizontal'),
 };
 
-const revealOrder = Array.from({ length: PIXEL_COUNT }, (_, position) => position)
-  .sort((a, b) => waveScore(a) - waveScore(b) || a - b);
+function createRevealOrder(seed) {
+  const order = Array.from({ length: PIXEL_COUNT }, (_, position) => position);
+  let state = (seed + 1) >>> 0;
+  for (let index = order.length - 1; index > 0; index -= 1) {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    const swap = state % (index + 1);
+    [order[index], order[swap]] = [order[swap], order[index]];
+  }
+  return order;
+}
 
 function assertResponse(response, path) {
   if (!response.ok) throw new Error('Unable to load ' + path + ' (' + response.status + ')');
@@ -127,24 +135,6 @@ function drawSkeleton(canvas, seed) {
   context.putImageData(image, 0, 0);
 }
 
-function drawBayerFrame(tile, phase) {
-  const image = tile.effectContext.createImageData(SIZE, SIZE);
-  const level = (phase + 1) * 8;
-  for (let position = 0; position < PIXEL_COUNT; position += 1) {
-    const x = position % SIZE;
-    const y = Math.floor(position / SIZE);
-    const threshold = bayer8[(y + phase) % 8][(x + phase * 3) % 8];
-    if (threshold >= level) continue;
-    const offset = position * 4;
-    const alpha = 24 + Math.round((level - threshold) * 0.7);
-    image.data[offset] = 158;
-    image.data[offset + 1] = 230;
-    image.data[offset + 2] = 173;
-    image.data[offset + 3] = alpha;
-  }
-  tile.effectContext.putImageData(image, 0, 0);
-}
-
 function createReadout(seed, symmetry) {
   const readout = document.createElement('div');
   readout.className = 'tile-readout';
@@ -183,26 +173,25 @@ function createTile(seed) {
 
   const symmetry = SYMMETRIES[seed % SYMMETRIES.length];
   element.dataset.symmetry = symmetry;
+  element.style.setProperty('--wave-delay', `${-((seed % 9) * 0.37).toFixed(2)}s`);
+  element.style.setProperty('--wave-angle', `${100 + (seed % 5) * 7}deg`);
 
   const skeleton = createCanvas('skeleton-canvas');
   const output = createCanvas('output-canvas');
-  const effect = createCanvas('bayer-effect');
   const readout = createReadout(seed, symmetry);
   drawSkeleton(skeleton, seed);
-  element.append(skeleton, output, effect, readout.readout);
+  element.append(skeleton, output, readout.readout);
 
   return {
     element,
     skeleton,
     output,
-    effect,
     context: output.getContext('2d'),
-    effectContext: effect.getContext('2d'),
     readout: readout.readout,
     readoutCode: readout.code,
     seed,
     symmetry,
-    revealOrder,
+    revealOrder: createRevealOrder(seed),
     image: null,
     revealed: 0,
   };
@@ -332,12 +321,10 @@ function animateBatch(tiles, images) {
 
   return new Promise((resolve) => {
     const start = performance.now();
-    let lastBayerPhase = -1;
 
     const finish = () => {
       tiles.forEach((tile, index) => {
         tile.skeleton.remove();
-        tile.effect.remove();
         tile.element.setAttribute('aria-label', 'Generated pixel pattern ' + (index + 1));
         tile.element.dataset.state = 'ready';
         tile.image = null;
@@ -349,11 +336,6 @@ function animateBatch(tiles, images) {
       const progress = reducedMotion.matches
         ? 1
         : Math.min(1, (performance.now() - start) / REVEAL_MS);
-      const bayerPhase = Math.floor((performance.now() - start) / 105) % 8;
-      if (!reducedMotion.matches && bayerPhase !== lastBayerPhase) {
-        tiles.forEach((tile) => drawBayerFrame(tile, bayerPhase));
-        lastBayerPhase = bayerPhase;
-      }
       tiles.forEach((tile, index) => {
         const count = Math.floor(progress * tile.revealOrder.length);
         drawFrame(tile, images[index], imageBuffers[index], count);
