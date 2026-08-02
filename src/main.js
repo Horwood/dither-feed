@@ -14,34 +14,47 @@ const STYLE_PROFILES = {
   fauna: {
     code: 'FAU',
     symmetry: 'vertical',
-    minDensity: 0.34,
+    minDensity: 0.38,
+    sectorWeights: [40, 20, 20, 15, 5],
     palette: [[0, 0, 0], [85, 0, 0], [170, 0, 85], [255, 85, 0], [255, 170, 85], [255, 255, 170], [255, 255, 255]],
   },
   botanical: {
     code: 'BOT',
     symmetry: 'vertical',
-    minDensity: 0.38,
+    minDensity: 0.42,
+    sectorWeights: [15, 30, 35, 10, 10],
     palette: [[0, 0, 0], [0, 85, 0], [0, 170, 85], [85, 170, 0], [170, 255, 85], [255, 255, 170], [255, 255, 255]],
   },
   terrain: {
     code: 'TER',
     symmetry: 'horizontal',
-    minDensity: 0.36,
+    minDensity: 0.40,
+    sectorWeights: [25, 20, 15, 25, 15],
     palette: [[0, 0, 0], [0, 0, 85], [0, 85, 170], [0, 170, 255], [85, 170, 255], [170, 255, 255], [255, 255, 255]],
   },
   geometry: {
     code: 'GEO',
     symmetry: 'vertical',
-    minDensity: 0.42,
+    minDensity: 0.46,
+    sectorWeights: [15, 10, 30, 15, 30],
     palette: [[0, 0, 0], [85, 85, 85], [170, 170, 170], [255, 255, 255], [255, 85, 0], [255, 170, 0], [255, 255, 85]],
   },
   textile: {
     code: 'TXT',
     symmetry: 'horizontal',
-    minDensity: 0.44,
+    minDensity: 0.48,
+    sectorWeights: [15, 40, 25, 5, 15],
     palette: [[0, 0, 0], [85, 0, 85], [170, 0, 170], [255, 0, 170], [255, 85, 170], [255, 170, 255], [255, 255, 255]],
   },
 };
+const SECTOR_GRID = 4;
+const SECTOR_SIZE = SIZE / SECTOR_GRID;
+const SECTOR_FIELD = 0;
+const SECTOR_DITHER = 1;
+const SECTOR_ECHO = 2;
+const SECTOR_CUT = 3;
+const SECTOR_LINE = 4;
+const STYLE_OFFSET = Math.floor(Math.random() * DEFAULT_STYLES.length);
 const BOTTOM_EPSILON = 3;
 const LOAD_INTENT_THRESHOLD = 220;
 const INITIAL_BATCHES = window.matchMedia('(max-width: 640px)').matches ? 2 : 3;
@@ -300,21 +313,81 @@ function styleProfile(style) {
   return STYLE_PROFILES[style] || STYLE_PROFILES.geometry;
 }
 
+function makeSeededRandom(seed) {
+  let state = (seed ^ 0x9e3779b9) >>> 0;
+  return () => {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
+}
+
+function pickSectorMode(random, weights) {
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  let cursor = random() * total;
+  for (let mode = 0; mode < weights.length; mode += 1) {
+    cursor -= weights[mode];
+    if (cursor <= 0) return mode;
+  }
+  return SECTOR_FIELD;
+}
+
+function buildSectorPlan(style, symmetry, seed, harmonyLength) {
+  const random = makeSeededRandom(seed + 0x51f15e);
+  const weights = styleProfile(style).sectorWeights;
+  const plan = Array.from({ length: SECTOR_GRID * SECTOR_GRID }, () => null);
+  let cutSectors = 0;
+  for (let row = 0; row < SECTOR_GRID; row += 1) {
+    for (let column = 0; column < SECTOR_GRID; column += 1) {
+      const mirrorColumn = symmetry === 'vertical' ? SECTOR_GRID - 1 - column : column;
+      const mirrorRow = symmetry === 'horizontal' ? SECTOR_GRID - 1 - row : row;
+      const index = row * SECTOR_GRID + column;
+      const mirror = mirrorRow * SECTOR_GRID + mirrorColumn;
+      if (index > mirror) continue;
+      let mode = pickSectorMode(random, weights);
+      const centralSector = row > 0 && row < SECTOR_GRID - 1
+        && column > 0 && column < SECTOR_GRID - 1;
+      if (mode === SECTOR_CUT && (centralSector || cutSectors >= 2)) mode = SECTOR_FIELD;
+      if (mode === SECTOR_CUT) cutSectors += 1;
+      const tone = 1 + Math.floor(random() * Math.max(1, harmonyLength - 2));
+      const phase = Math.floor(random() * 4);
+      const sector = { mode, tone, phase };
+      plan[index] = sector;
+      plan[mirror] = sector;
+    }
+  }
+  return plan;
+}
+
+function sectorAt(position) {
+  const x = position % SIZE;
+  const y = Math.floor(position / SIZE);
+  return Math.floor(y / SECTOR_SIZE) * SECTOR_GRID + Math.floor(x / SECTOR_SIZE);
+}
+
 function styleForSeed(seed) {
   const styles = availableStyles();
   const row = Math.floor(seed / BATCH_SIZE);
   const column = seed % BATCH_SIZE;
-  return styles[(column + row * 2) % styles.length];
+  return styles[(column + row * 2 + STYLE_OFFSET) % styles.length];
 }
 
 function chooseCode(style) {
   const range = modelInfo.styleRanges?.[style];
   const start = range ? range[0] : 0;
   const end = range ? range[1] : modelInfo.perClass;
-  let code = start + Math.floor(Math.random() * Math.max(1, end - start));
+  const quality = modelInfo.quality;
+  const pool = quality
+    ? Array.from({ length: Math.max(1, end - start) }, (_, index) => start + index)
+      .filter((candidate) => quality[candidate] >= 0.4)
+    : [];
+  const candidates = pool.length ? pool : Array.from(
+    { length: Math.max(1, end - start) },
+    (_, index) => start + index,
+  );
+  let code = candidates[Math.floor(Math.random() * candidates.length)];
   let attempts = 0;
   while (recentCodeSet.has(code) && attempts < 12) {
-    code = start + Math.floor(Math.random() * Math.max(1, end - start));
+    code = candidates[Math.floor(Math.random() * candidates.length)];
     attempts += 1;
   }
   rememberCode(code);
@@ -357,6 +430,7 @@ function createReadout(seed, symmetry, style) {
     ['PX', '24×24'],
     ['SYM', symmetry === 'vertical' ? 'V' : 'H'],
     ['MOT', styleProfile(style).code],
+    ['SEC', '4×4'],
     ['PAL', '64'],
     ['BYR', '8×8'],
   ];
@@ -449,20 +523,27 @@ function pixelLuminance(index) {
   return (colour[0] * 0.2126 + colour[1] * 0.7152 + colour[2] * 0.0722) / 255;
 }
 
-function harmonyColour(index, style, position, seed) {
+function harmonyColour(index, style, position, seed, harmony, sectorPlan) {
   if (index === 0) return 0;
-  const harmony = harmonyIndices(style);
   if (harmony.length < 2) return index;
   const brightness = pixelLuminance(index);
   const bayer = bayer8[(Math.floor(position / SIZE) + seed) % 8][(position + seed * 3) % 8];
-  const level = Math.max(
+  let level = Math.max(
     1,
     Math.min(harmony.length - 1, Math.round(brightness * (harmony.length - 1)) + (bayer < 12 ? 1 : 0)),
   );
+  const sector = sectorPlan[sectorAt(position)];
+  if (sector && sector.mode === SECTOR_DITHER && bayer < 12) level = sector.tone;
+  if (sector && sector.mode === SECTOR_LINE && (position % SIZE + Math.floor(position / SIZE) + sector.phase) % 5 < 1) {
+    level = sector.tone;
+  }
+  const highlight = harmony.length - 1;
+  if (level === highlight && bayer > 24) level = Math.max(1, highlight - 1);
+  if (level > 1 && bayer > 50 && sector?.mode !== SECTOR_LINE) level -= 1;
   return harmony[level];
 }
 
-function fillPriority(style, x, y, seed, near, bounds) {
+function fillPriority(style, x, y, seed, near, bounds, sector) {
   const threshold = bayer8[(y + seed) % 8][(x + seed * 3) % 8];
   const centerX = Math.abs(x - 11.5);
   const centerY = Math.abs(y - 11.5);
@@ -470,29 +551,77 @@ function fillPriority(style, x, y, seed, near, bounds) {
   const inside = x >= bounds.minX && x <= bounds.maxX && y >= bounds.minY && y <= bounds.maxY;
 
   if (style === 'fauna') {
-    return (inside ? 22 : 0) + (near ? 34 : 0) + (radial < 8 ? 10 : 0) + (threshold < 10 ? 8 : 0);
+    return (inside ? 22 : 0) + (near ? 34 : 0) + (radial < 8 ? 10 : 0) + (threshold < 10 ? 8 : 0)
+      + (sector.mode === SECTOR_ECHO ? 18 : 0)
+      + (sector.mode === SECTOR_CUT ? -24 : 0);
   }
   if (style === 'botanical') {
     const petal = Math.abs(centerX - centerY) < 2.5 || radial < 4;
-    return (petal ? 30 : 0) + (near ? 28 : 0) + (threshold < 16 ? 10 : 0);
+    return (petal ? 30 : 0) + (near ? 28 : 0) + (threshold < 16 ? 10 : 0)
+      + (sector.mode === SECTOR_ECHO ? 22 : 0)
+      + (sector.mode === SECTOR_CUT ? -18 : 0);
   }
   if (style === 'terrain') {
     const band = Math.abs((y % 6) - 2) < 2;
-    return (band ? 24 : 0) + (near ? 28 : 0) + (y > 11 ? 10 : 0) + (threshold < 14 ? 8 : 0);
+    return (band ? 24 : 0) + (near ? 28 : 0) + (y > 11 ? 10 : 0) + (threshold < 14 ? 8 : 0)
+      + (sector.mode === SECTOR_LINE ? 24 : 0)
+      + (sector.mode === SECTOR_CUT ? -22 : 0);
   }
   if (style === 'geometry') {
     const ring = Math.abs((centerX + centerY) % 6 - 2) < 1.8;
     const diagonal = (x + y + seed) % 5 < 2;
-    return (ring ? 26 : 0) + (diagonal ? 14 : 0) + (near ? 30 : 0) + (threshold < 18 ? 8 : 0);
+    return (ring ? 26 : 0) + (diagonal ? 14 : 0) + (near ? 30 : 0) + (threshold < 18 ? 8 : 0)
+      + (sector.mode === SECTOR_LINE ? 24 : 0)
+      + (sector.mode === SECTOR_ECHO ? 18 : 0)
+      + (sector.mode === SECTOR_CUT ? -20 : 0);
   }
   const checker = (Math.floor(x / 3) + Math.floor(y / 3) + seed) % 2 === 0;
-  return (checker ? 24 : 0) + (near ? 32 : 0) + (threshold < 20 ? 8 : 0);
+  return (checker ? 24 : 0) + (near ? 32 : 0) + (threshold < 20 ? 8 : 0)
+    + (sector.mode === SECTOR_DITHER ? 22 : 0)
+    + (sector.mode === SECTOR_CUT ? -16 : 0);
+}
+
+function sectorMotif(style, mode, localX, localY, phase) {
+  const diagonal = ((localX - localY + phase + 12) % 6 + 6) % 6;
+  if (mode === SECTOR_DITHER) return (localX + localY + phase) % 3 === 0;
+  if (mode === SECTOR_LINE) return diagonal === 0 || diagonal === 1;
+  if (mode !== SECTOR_ECHO) return false;
+  if (style === 'fauna') {
+    return (localX === 1 || localX === 4) && localY === 2;
+  }
+  if (style === 'botanical') {
+    return Math.abs(Math.abs(localX - 2.5) - Math.abs(localY - 2.5)) < 0.8;
+  }
+  if (style === 'terrain') {
+    return localY === (phase % 3) || (localY === 4 && localX % 2 === phase % 2);
+  }
+  if (style === 'geometry') {
+    return diagonal === 0 || ((localX + localY + phase) % 5 === 0);
+  }
+  return (localX + localY + phase) % 4 < 2;
+}
+
+function paintSectorMotifs(result, pixels, symmetry, style, harmony, sectorPlan) {
+  symmetryOrders[symmetry].forEach(({ position, mirror }) => {
+    const sector = sectorPlan[sectorAt(position)];
+    if (!sector || sector.mode === SECTOR_FIELD || sector.mode === SECTOR_CUT) return;
+    const x = position % SIZE;
+    const y = Math.floor(position / SIZE);
+    const localX = x % SECTOR_SIZE;
+    const localY = y % SECTOR_SIZE;
+    if (!sectorMotif(style, sector.mode, localX, localY, sector.phase)) return;
+    if (result[position] !== 0 || result[mirror] !== 0) return;
+    const colour = harmony[sector.tone] || harmony[1] || 1;
+    result[position] = colour;
+    result[mirror] = colour;
+  });
 }
 
 function densifyPixels(pixels, symmetry, seed, style) {
   const result = pixels.slice();
   const profile = styleProfile(style);
   const harmony = harmonyIndices(style);
+  const sectorPlan = buildSectorPlan(style, symmetry, seed, harmony.length);
   const keepBlackFrame = seed % 5 === 0;
   const bounds = { minX: SIZE, minY: SIZE, maxX: -1, maxY: -1 };
 
@@ -504,7 +633,7 @@ function densifyPixels(pixels, symmetry, seed, style) {
     bounds.maxX = Math.max(bounds.maxX, x);
     bounds.minY = Math.min(bounds.minY, y);
     bounds.maxY = Math.max(bounds.maxY, y);
-    result[position] = harmonyColour(colour, style, position, seed);
+    result[position] = harmonyColour(colour, style, position, seed, harmony, sectorPlan);
   });
 
   if (bounds.maxX < 0) {
@@ -517,17 +646,37 @@ function densifyPixels(pixels, symmetry, seed, style) {
   const pairs = symmetryOrders[symmetry];
   const candidates = [];
   pairs.forEach(({ position, mirror }) => {
-    if (pixels[position] !== 0 || pixels[mirror] !== 0) return;
+    const sector = sectorPlan[sectorAt(position)];
     const x = position % SIZE;
     const y = Math.floor(position / SIZE);
+    const threshold = bayer8[(y + seed) % 8][(x + seed * 3) % 8];
+    const interior = !isEdge(position) && !isEdge(mirror)
+      && Math.abs(x - 11.5) + Math.abs(y - 11.5) > 5;
+    let carved = false;
+    if (
+      sector.mode === SECTOR_CUT
+      && pixels[position] !== 0
+      && pixels[mirror] !== 0
+      && interior
+      && threshold > 56
+      && (x % SECTOR_SIZE > 1 || y % SECTOR_SIZE > 1)
+      && (x + y + sector.phase) % 5 < 2
+    ) {
+      result[position] = 0;
+      result[mirror] = 0;
+      carved = true;
+    }
+    if (!carved && (pixels[position] !== 0 || pixels[mirror] !== 0)) return;
     if (keepBlackFrame && (isEdge(position) || isEdge(mirror))) return;
     const near = [
       position - 1, position + 1, position - SIZE, position + SIZE,
     ].some((neighbour) => neighbour >= 0 && neighbour < PIXEL_COUNT && pixels[neighbour] !== 0);
-    const priority = fillPriority(style, x, y, seed, near, bounds);
-    candidates.push({ position, mirror, priority, x, y });
+    const priority = fillPriority(style, x, y, seed, near, bounds, sector);
+    candidates.push({ position, mirror, priority, x, y, sector });
     if (priority >= 38 || (near && priority >= 28)) {
-      const accent = harmony[1 + ((x + y + seed) % Math.max(1, harmony.length - 1))] || harmony[1] || 1;
+      const accent = sector.mode === SECTOR_ECHO || sector.mode === SECTOR_DITHER || sector.mode === SECTOR_LINE
+        ? harmony[sector.tone] || harmony[1] || 1
+        : harmony[1 + ((x + y + seed) % Math.max(1, harmony.length - 1))] || harmony[1] || 1;
       result[position] = accent;
       result[mirror] = accent;
     }
@@ -537,15 +686,31 @@ function densifyPixels(pixels, symmetry, seed, style) {
   let density = result.reduce((count, colour) => count + (colour !== 0 ? 1 : 0), 0);
   candidates
     .sort((left, right) => right.priority - left.priority || left.position - right.position)
-    .some(({ position, mirror, x, y }, index) => {
+    .some(({ position, mirror, x, y, sector }, index) => {
       if (density >= minimum) return true;
       if (result[position] !== 0 || result[mirror] !== 0) return false;
-      const accent = harmony[1 + ((index + seed + x + y) % Math.max(1, harmony.length - 1))] || harmony[1] || 1;
+      const accent = sector.mode === SECTOR_ECHO || sector.mode === SECTOR_DITHER || sector.mode === SECTOR_LINE
+        ? harmony[sector.tone] || harmony[1] || 1
+        : harmony[1 + ((index + seed + x + y) % Math.max(1, harmony.length - 1))] || harmony[1] || 1;
       result[position] = accent;
       result[mirror] = accent;
       density += position === mirror ? 1 : 2;
       return false;
     });
+
+  paintSectorMotifs(result, pixels, symmetry, style, harmony, sectorPlan);
+
+  symmetryOrders[symmetry].forEach(({ position, mirror }) => {
+    if (result[position] !== 0 || result[mirror] !== 0) return;
+    const x = position % SIZE;
+    const y = Math.floor(position / SIZE);
+    const centralDistance = Math.abs(x - 11.5) + Math.abs(y - 11.5);
+    if (isEdge(position) || isEdge(mirror) || centralDistance > 8.5) return;
+    const sector = sectorPlan[sectorAt(position)];
+    const colour = harmony[sector.tone] || harmony[1] || 1;
+    result[position] = colour;
+    result[mirror] = colour;
+  });
 
   return result;
 }
@@ -782,9 +947,11 @@ function animateBatch(tiles, images) {
 
 async function generatePatternBatch(tiles) {
   const latent = new Float32Array(BATCH_SIZE * modelInfo.latent);
+  const variationSeeds = new Uint32Array(BATCH_SIZE);
   for (let index = 0; index < BATCH_SIZE; index += 1) {
     const code = chooseCode(tiles[index].style);
     tiles[index].readoutCode.textContent = 'LAT ' + code.toString(16).toUpperCase().padStart(3, '0');
+    variationSeeds[index] = (tiles[index].seed + code * 7919) >>> 0;
     const offset = code * modelInfo.latent;
     const targetOffset = index * modelInfo.latent;
     for (let dimension = 0; dimension < modelInfo.latent; dimension += 1) {
@@ -802,7 +969,7 @@ async function generatePatternBatch(tiles) {
         result.logits.data,
         index,
         tiles[index].symmetry,
-        tiles[index].seed,
+        variationSeeds[index],
         tiles[index].style,
       ),
     );

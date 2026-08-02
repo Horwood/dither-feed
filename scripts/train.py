@@ -24,7 +24,7 @@ LATENT = 40
 COLORS = 64
 PATTERN_COUNT = 1200
 EXPORT_BATCH = 4
-PATTERN_VARIANTS = 2
+PATTERN_VARIANTS = 4
 PATTERN_SAMPLES_PER_STYLE = 4000
 
 # The source set is object-oriented rather than an ornament set.  These broad
@@ -132,6 +132,33 @@ def woven_repeat(tokens: torch.Tensor, start: int) -> torch.Tensor:
     return torch.where(mask, vertical, horizontal)
 
 
+def sector_mix(primary: torch.Tensor, alternate: torch.Tensor, style: int, variant: int) -> torch.Tensor:
+    """Exchange a few mirrored 6×6 sectors to avoid one repeated silhouette."""
+
+    result = primary.clone()
+    vertical = style in (0, 1, 3)
+    for row in range(4):
+        for column in range(4):
+            mirror_row = 3 - row if not vertical else row
+            mirror_column = 3 - column if vertical else column
+            index = row * 4 + column
+            mirror = mirror_row * 4 + mirror_column
+            if index > mirror or (index + style * 3 + variant * 5) % 5 not in (0, 2):
+                continue
+            y0, y1 = row * 6, (row + 1) * 6
+            x0, x1 = column * 6, (column + 1) * 6
+            patch = alternate[y0:y1, x0:x1]
+            result[y0:y1, x0:x1] = patch
+            if mirror != index:
+                my0, my1 = mirror_row * 6, (mirror_row + 1) * 6
+                mx0, mx1 = mirror_column * 6, (mirror_column + 1) * 6
+                if vertical:
+                    result[my0:my1, mx0:mx1] = patch.flip(-1)
+                else:
+                    result[my0:my1, mx0:mx1] = patch.flip(-2)
+    return result
+
+
 def apply_dither(tokens: torch.Tensor, style: int, variant: int) -> torch.Tensor:
     """Add a restrained field of pixels so motifs read as ornaments, not cutouts."""
 
@@ -172,6 +199,18 @@ def pattern_tokens(tokens: torch.Tensor, background: int, style: int, variant: i
         result = diamond_repeat(source, start)
     else:  # woven, ethnic-like repeats with a little controlled variation
         result = woven_repeat(source, start)
+    alternate_start = starts[(variant + style + 2) % len(starts)]
+    if style == 0:
+        alternate = rosette(source, alternate_start)
+    elif style == 1:
+        alternate = mirror_vertical(source, alternate_start)
+    elif style == 2:
+        alternate = woven_repeat(source, alternate_start)
+    elif style == 3:
+        alternate = mirror_vertical(source, alternate_start)
+    else:
+        alternate = diamond_repeat(source, alternate_start)
+    result = sector_mix(result, alternate, style, variant)
     return apply_dither(result, style, variant)
 
 
@@ -317,6 +356,22 @@ def export(model: ConditionalVAE, data: PixelDataset, target: torch.device) -> N
 
     if len(bank) != PATTERN_COUNT:
         raise RuntimeError(f"Expected {PATTERN_COUNT} pattern vectors, got {len(bank)}")
+
+    with torch.no_grad():
+        bank_tensor = torch.tensor(bank, dtype=torch.float32, device=target)
+        labels = torch.ones(PATTERN_COUNT, dtype=torch.long, device=target)
+        decoded = model.decode(bank_tensor, labels).argmax(1)
+        foreground = decoded.ne(0).float()
+        density = foreground.mean(dim=(1, 2))
+        inner_density = foreground[:, 4:20, 4:20].mean(dim=(1, 2))
+        horizontal_edges = decoded[:, :, 1:] != decoded[:, :, :-1]
+        vertical_edges = decoded[:, 1:, :] != decoded[:, :-1, :]
+        texture = torch.cat((horizontal_edges.flatten(1), vertical_edges.flatten(1)), dim=1).float().mean(1)
+        density_score = (1 - (density - 0.52).abs() / 0.52).clamp(0, 1)
+        inner_score = (1 - (inner_density - 0.48).abs() / 0.48).clamp(0, 1)
+        texture_score = (1 - (texture - 0.26).abs() / 0.26).clamp(0, 1)
+        quality = (density_score * 0.45 + inner_score * 0.35 + texture_score * 0.20).cpu().tolist()
+
     output_dir = ROOT / "public" / "model"
     output_dir.mkdir(parents=True, exist_ok=True)
     model.cpu()
@@ -338,6 +393,9 @@ def export(model: ConditionalVAE, data: PixelDataset, target: torch.device) -> N
         "styles": list(STYLE_NAMES),
         "styleRanges": style_ranges,
         "patternVariants": PATTERN_VARIANTS,
+        "sectorGrid": 4,
+        "sectorSize": 6,
+        "quality": [round(value, 4) for value in quality],
         "palette": palette,
     }, indent=2) + "\n")
     print(f"Exported pattern model ({(output_dir / 'garden-cvae.onnx').stat().st_size / 1_000_000:.2f} MB) and {len(bank[:PATTERN_COUNT])} latent codes")
