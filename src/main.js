@@ -65,6 +65,9 @@ const sentinel = document.querySelector('#feed-sentinel');
 const bootScreen = document.querySelector('#boot-screen');
 const bootStatus = document.querySelector('#boot-status');
 const bootProgressBar = document.querySelector('#boot-progress-bar');
+const terminalLiveState = document.querySelector('#terminal-live-state');
+const terminalLiveCount = document.querySelector('#terminal-live-count');
+const terminalLiveRate = document.querySelector('#terminal-live-rate');
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
 let session;
@@ -80,6 +83,9 @@ const recentCodeSet = new Set();
 let bootPhaseTimer;
 let bootProgressTimer;
 let bootProgressValue = 7;
+let generatedCount = 0;
+const liveStartedAt = performance.now();
+let liveStatusTimer;
 
 const bootPhases = [
   'mounting local model',
@@ -87,6 +93,29 @@ const bootPhases = [
   'initializing wasm inference',
   'warming pixel buffer',
 ];
+
+function liveStateLabel(state) {
+  if (state === 'synth') return 'SYNTH';
+  if (state === 'error') return 'ERR';
+  if (state === 'ready') return 'READY';
+  return 'BOOT';
+}
+
+function updateLiveStatus(state) {
+  if (!terminalLiveState || !terminalLiveCount || !terminalLiveRate) return;
+  const currentState = state || (blocked ? 'error' : loading ? 'synth' : session ? 'ready' : 'boot');
+  const elapsed = Math.max(1, (performance.now() - liveStartedAt) / 1000);
+  const rate = generatedCount / elapsed;
+  terminalLiveState.textContent = liveStateLabel(currentState);
+  terminalLiveState.dataset.state = currentState;
+  terminalLiveCount.textContent = 'GEN ' + String(generatedCount).padStart(4, '0');
+  terminalLiveRate.textContent = 'RATE ' + rate.toFixed(1) + '/S';
+}
+
+function startLiveStatus() {
+  updateLiveStatus('boot');
+  liveStatusTimer = window.setInterval(() => updateLiveStatus(), 700);
+}
 
 function setBootStatus(message, progress = bootProgressValue) {
   if (bootStatus) bootStatus.textContent = message;
@@ -115,12 +144,14 @@ function finishBoot(error = false) {
   window.clearInterval(bootPhaseTimer);
   window.clearInterval(bootProgressTimer);
   setBootStatus(error ? 'model unavailable' : 'feed ready', 100);
+  updateLiveStatus(error ? 'error' : 'ready');
   document.body.classList.remove('is-booting');
   bootScreen.dataset.state = 'leaving';
   window.setTimeout(() => bootScreen.remove(), reducedMotion.matches ? 0 : 420);
 }
 
 startBootSequence();
+startLiveStatus();
 
 const shaderVertexSource = `
   attribute vec2 position;
@@ -925,6 +956,8 @@ function animateBatch(tiles, images) {
         tile.image = null;
         startShaderBurst(tile.element, tile.output);
       });
+      generatedCount += tiles.length;
+      updateLiveStatus('ready');
       resolve();
     };
 
@@ -987,12 +1020,14 @@ function showError(error) {
   line.className = 'error-line';
   line.textContent = 'dither-feed: model unavailable\n' + (error.message || error);
   feed.append(line);
+  updateLiveStatus('error');
   finishBoot(true);
 }
 
 async function loadMore() {
   if (loading || blocked || !session) return;
   loading = true;
+  updateLiveStatus('synth');
   const tiles = appendBatch();
   try {
     const images = await generatePatternBatch(tiles);
@@ -1002,6 +1037,7 @@ async function loadMore() {
     showError(error);
   } finally {
     loading = false;
+    updateLiveStatus();
   }
 }
 

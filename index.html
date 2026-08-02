@@ -40,10 +40,18 @@
       </section>
     </div>
     <main class="terminal-shell" aria-label="dither-feed terminal">
-      <div class="terminal-line" aria-hidden="true">
-        <span class="terminal-prompt">›</span>
-        <span>dither-feed</span>
-        <span class="terminal-cursor"></span>
+      <div class="terminal-line">
+        <span class="terminal-prompt" aria-hidden="true">›</span>
+        <span aria-hidden="true">dither-feed</span>
+        <span class="terminal-cursor" aria-hidden="true"></span>
+        <span class="terminal-live-status" role="status" aria-live="polite" aria-atomic="true">
+          <span class="terminal-live-pip" aria-hidden="true"></span>
+          <span id="terminal-live-state" class="terminal-live-state">BOOT</span>
+          <span class="terminal-live-separator" aria-hidden="true">·</span>
+          <span id="terminal-live-count" class="terminal-live-count">GEN 0000</span>
+          <span class="terminal-live-separator terminal-live-rate-separator" aria-hidden="true">·</span>
+          <span id="terminal-live-rate" class="terminal-live-rate">RATE 0.0/S</span>
+        </span>
       </div>
       <div id="terminal-scroll" class="terminal-scroll">
         <div id="feed" class="feed" aria-label="Generated pixel patterns"></div>
