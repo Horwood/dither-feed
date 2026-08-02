@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+title: "dither-feed"
+message: "If you use this project, please cite the repository and preserve the dataset attribution in DATASET.md."
+type: software
+authors:
+  - family-names: Kalkaev
+    given-names: Ivan
+    affiliation: Independent
+repository-code: "https://github.com/Horwood/dither-feed"
+url: "https://horwood.github.io/dither-feed/"
+license: MIT
+version: "0.1.0"
+date-released: 2026-08-02
+keywords:
+  - pixel art
+  - dithering
+  - generative art
+  - WebGL
+  - ONNX Runtime Web
+  - JavaScript

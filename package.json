@@ -2,6 +2,9 @@
   "name": "dither-feed",
   "private": true,
   "version": "0.1.0",
+  "description": "A terminal-like infinite stream of locally generated 24×24 pixel patterns.",
+  "author": "Ivan Kalkaev",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
