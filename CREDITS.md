@@ -2,11 +2,7 @@
 
 ## Project authorship
 
-**Ivan Kalkaev** is the author and maintainer of `dither-feed`.
-
-Ivan led the product concept, terminal visual language, interaction model, frontend architecture, pattern-processing approach, rendering effects, and deployment. The majority of the shipped frontend implementation was authored by Ivan.
-
-**Codex** was used as an AI pair-programming tool for selected coding passes, debugging, verification, and documentation. Codex is not a rights holder, co-author, or maintainer of this repository.
+I am **Ivan Kalkaev**, the author and maintainer of `dither-feed`. I developed the product concept, terminal visual language, interaction model, frontend architecture, pattern-processing approach, rendering effects, and deployment, and built the shipped frontend around them.
 
 ## Training data
 

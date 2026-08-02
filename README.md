@@ -131,9 +131,7 @@ The browser runtime also uses [ONNX Runtime Web](https://github.com/microsoft/on
 
 ## Authorship
 
-`dither-feed` is authored and maintained by **Ivan Kalkaev**. Ivan led the concept, visual language, interaction model, frontend architecture, rendering pipeline, and deployment decisions, and authored the majority of the shipped frontend implementation.
-
-**Codex** was used as an AI pair-programming tool for selected implementation passes, debugging, verification, and documentation. It is not a rights holder or a co-author of the project.
+I am **Ivan Kalkaev**, and I designed and built `dither-feed` as an independent exploration of browser-native generative graphics. I shaped the concept, terminal visual language, interaction model, frontend architecture, rendering pipeline, and deployment, and built the shipped frontend around those decisions.
 
 ## License
 
