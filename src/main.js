@@ -17,6 +17,9 @@ const INITIAL_BATCHES = window.matchMedia('(max-width: 640px)').matches ? 2 : 3;
 const terminalScroll = document.querySelector('#terminal-scroll');
 const feed = document.querySelector('#feed');
 const sentinel = document.querySelector('#feed-sentinel');
+const bootScreen = document.querySelector('#boot-screen');
+const bootStatus = document.querySelector('#boot-status');
+const bootProgressBar = document.querySelector('#boot-progress-bar');
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
 let session;
@@ -29,6 +32,50 @@ let bottomIntent = 0;
 let lastTouchY = null;
 let recentCodes = [];
 const recentCodeSet = new Set();
+let bootPhaseTimer;
+let bootProgressTimer;
+let bootProgressValue = 7;
+
+const bootPhases = [
+  'mounting local model',
+  'reading latent bank',
+  'initializing wasm inference',
+  'warming pixel buffer',
+];
+
+function setBootStatus(message, progress = bootProgressValue) {
+  if (bootStatus) bootStatus.textContent = message;
+  if (bootProgressBar) {
+    bootProgressValue = Math.max(0, Math.min(100, progress));
+    bootProgressBar.style.transform = `scaleX(${bootProgressValue / 100})`;
+  }
+}
+
+function startBootSequence() {
+  if (!bootScreen) return;
+  let phase = 0;
+  setBootStatus(bootPhases[phase], bootProgressValue);
+  bootPhaseTimer = window.setInterval(() => {
+    phase = (phase + 1) % bootPhases.length;
+    setBootStatus(bootPhases[phase], bootProgressValue);
+  }, 520);
+  bootProgressTimer = window.setInterval(() => {
+    bootProgressValue = Math.min(91, bootProgressValue + (bootProgressValue < 52 ? 3.2 : 0.8));
+    setBootStatus(bootStatus?.textContent || bootPhases[phase], bootProgressValue);
+  }, 140);
+}
+
+function finishBoot(error = false) {
+  if (!bootScreen) return;
+  window.clearInterval(bootPhaseTimer);
+  window.clearInterval(bootProgressTimer);
+  setBootStatus(error ? 'model unavailable' : 'feed ready', 100);
+  document.body.classList.remove('is-booting');
+  bootScreen.dataset.state = 'leaving';
+  window.setTimeout(() => bootScreen.remove(), reducedMotion.matches ? 0 : 420);
+}
+
+startBootSequence();
 
 const shaderVertexSource = `
   attribute vec2 position;
@@ -85,29 +132,35 @@ const shaderFragmentSource = `
     float steppedDistance = mix(distanceFromCenter, pixelDistance, 0.62);
     float waveDistance = steppedDistance - waveRadius
       - (pixelRelief - 0.5) * 0.052;
-    float envelope = exp(-waveDistance * waveDistance * 155.0);
-    float wake = exp(-waveDistance * waveDistance * 58.0);
+    // A broad envelope makes the wave twice as wide; the crest profile below
+    // keeps its center concentrated and gives the edges a softer falloff.
+    float envelope = exp(-waveDistance * waveDistance * 39.0);
+    float wake = exp(-waveDistance * waveDistance * 14.0);
     float innerRipple = sin(waveDistance * 92.0 - progress * 10.0);
     float life = smoothstep(0.0, 0.07, progress)
       * (1.0 - smoothstep(0.72, 1.0, progress));
+    float crest = exp(-waveDistance * waveDistance * 180.0);
+    float waveEnergy = envelope * (0.14 + crest * 1.06);
 
     vec2 refraction = (
       direction * (
-        innerRipple * 0.064
-        + sin(waveDistance * 38.0 - progress * 7.0) * 0.024
+        innerRipple * 0.18
+        + sin(waveDistance * 38.0 - progress * 7.0) * 0.075
       )
-      + reliefNormal * (0.048 + pixelEdge * 0.026)
-    ) * (envelope * 0.82 + wake * 0.18) * life;
-    vec2 redShift = refraction * 1.72;
-    vec2 blueShift = refraction * 0.38;
+      + reliefNormal * (0.12 + pixelEdge * 0.1)
+      + vec2(reliefNormal.y, -reliefNormal.x)
+        * sin(waveDistance * 66.0 - progress * 12.0) * 0.045
+    ) * (waveEnergy * 1.08 + wake * 0.12) * life;
+    vec2 redShift = refraction * 2.35;
+    vec2 blueShift = refraction * 0.22;
     vec4 baseSample = texture2D(pattern, uv);
     float red = texture2D(pattern, uv + redShift).r;
     float green = texture2D(pattern, uv + refraction).g;
     float blue = texture2D(pattern, uv + blueShift).b;
     vec3 color = vec3(red, green, blue);
 
-    float crest = exp(-waveDistance * waveDistance * 620.0);
     float caustic = envelope
+      * (0.12 + crest * 1.08)
       * (0.5 + 0.5 * cos(waveDistance * 138.0 - progress * 16.0));
     vec3 reliefVector = normalize(vec3(reliefNormal * 5.0, 0.72));
     float reliefLight = clamp(
@@ -115,20 +168,20 @@ const shaderFragmentSource = `
       0.0,
       1.0
     );
-    float pixelSpecular = envelope
-      * (0.25 + reliefLight * 0.75)
-      * (0.45 + pixelEdge * 0.55);
+    float pixelSpecular = waveEnergy
+      * (0.12 + reliefLight * 1.08)
+      * (0.35 + pixelEdge * 0.65);
     float faceShade = (reliefLight - 0.42)
-      * envelope * (1.0 - pixelEdge) * 0.36;
+      * waveEnergy * (1.0 - pixelEdge) * 0.58;
     color = clamp(
       color + vec3(faceShade - pixelEdge * envelope * 0.055) * life,
       0.0,
       1.0
     );
     vec3 spectralLight = vec3(0.65, 0.94, 1.0)
-      * crest * (0.36 + pixelRelief * 0.42)
-      + vec3(0.28, 0.68, 1.0) * caustic * 0.22
-      + vec3(0.82, 0.98, 1.0) * pixelSpecular * 0.34;
+      * crest * (0.42 + pixelRelief * 0.72)
+      + vec3(0.28, 0.68, 1.0) * caustic * 0.34
+      + vec3(0.82, 0.98, 1.0) * pixelSpecular * 0.55;
 
     gl_FragColor = vec4(
       color + spectralLight * life * baseSample.a,
@@ -648,6 +701,7 @@ function showError(error) {
   line.className = 'error-line';
   line.textContent = 'dither-feed: model unavailable\n' + (error.message || error);
   feed.append(line);
+  finishBoot(true);
 }
 
 async function loadMore() {
@@ -662,12 +716,6 @@ async function loadMore() {
     showError(error);
   } finally {
     loading = false;
-  }
-}
-
-async function fillInitialViewport() {
-  for (let batch = 0; batch < INITIAL_BATCHES && !blocked; batch += 1) {
-    await loadMore();
   }
 }
 
@@ -773,5 +821,12 @@ terminalScroll.addEventListener('touchend', () => {
 observer.observe(sentinel);
 
 loadModel()
-  .then(fillInitialViewport)
+  .then(async () => {
+    await loadMore();
+    if (blocked) return;
+    finishBoot();
+    for (let batch = 1; batch < INITIAL_BATCHES && !blocked; batch += 1) {
+      await loadMore();
+    }
+  })
   .catch(showError);

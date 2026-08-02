@@ -5,10 +5,42 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#111111" />
     <title>dither-feed</title>
-    <script type="module" crossorigin src="/dither-feed/assets/index-BfvO6eCa.js"></script>
-    <link rel="stylesheet" crossorigin href="/dither-feed/assets/index-BfMOpwUk.css">
+    <script type="module" crossorigin src="/dither-feed/assets/index-BTVSbi97.js"></script>
+    <link rel="stylesheet" crossorigin href="/dither-feed/assets/index-D7HAl5rM.css">
   </head>
-  <body>
+  <body class="is-booting">
+    <div id="boot-screen" class="boot-screen" role="status" aria-live="polite">
+      <section class="boot-window" aria-label="dither-feed startup">
+        <div class="boot-bar" aria-hidden="true">
+          <span class="boot-bar-mark">[·]</span>
+          <span>dither-feed / startup</span>
+          <span class="boot-bar-signal">● ● ●</span>
+        </div>
+        <div class="boot-content">
+          <div class="boot-command" aria-hidden="true"><span>$</span> dither-feed --local --pixel-mode</div>
+          <h1 class="boot-title">LOCAL PIXEL PATTERN SYNTHESIS</h1>
+          <p class="boot-description">
+            A browser-native feed of 24×24 dither patterns. Four latent variations are rendered locally,
+            mirrored into ornaments, and revealed one pixel at a time as you move through the stream.
+          </p>
+          <div class="boot-readout" aria-hidden="true">
+            <span>MODEL / CVAE [4×40 → 4×64×24×24]</span>
+            <span>RENDER / WEBGL + BAYER 8×8</span>
+            <span>MODE / OFFLINE AFTER LOAD</span>
+          </div>
+          <div class="boot-status-line">
+            <span class="boot-status-prompt">&gt;</span>
+            <span id="boot-status">mounting local model</span>
+            <span class="boot-cursor" aria-hidden="true"></span>
+          </div>
+          <div class="boot-progress" aria-hidden="true"><span id="boot-progress-bar"></span></div>
+          <p class="boot-legal">
+            ASSETS / garden-cvae.onnx · latent-bank.bin · ort-wasm · WebGL<br />
+            LICENSE / app MIT · pixelgpt-24x24-20k data CC BY 4.0 · ONNX Runtime MIT · Vite MIT
+          </p>
+        </div>
+      </section>
+    </div>
     <main class="terminal-shell" aria-label="dither-feed terminal">
       <div class="terminal-line" aria-hidden="true">
         <span class="terminal-prompt">›</span>
