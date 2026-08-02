@@ -9,7 +9,39 @@ const REVEAL_MS = 1260;
 const SHADER_MS = 1350;
 const NOISE = 0.065;
 const RECENT_LIMIT = 64;
-const SYMMETRIES = ['vertical', 'horizontal'];
+const DEFAULT_STYLES = ['fauna', 'botanical', 'terrain', 'geometry', 'textile'];
+const STYLE_PROFILES = {
+  fauna: {
+    code: 'FAU',
+    symmetry: 'vertical',
+    minDensity: 0.34,
+    palette: [[0, 0, 0], [85, 0, 0], [170, 0, 85], [255, 85, 0], [255, 170, 85], [255, 255, 170], [255, 255, 255]],
+  },
+  botanical: {
+    code: 'BOT',
+    symmetry: 'vertical',
+    minDensity: 0.38,
+    palette: [[0, 0, 0], [0, 85, 0], [0, 170, 85], [85, 170, 0], [170, 255, 85], [255, 255, 170], [255, 255, 255]],
+  },
+  terrain: {
+    code: 'TER',
+    symmetry: 'horizontal',
+    minDensity: 0.36,
+    palette: [[0, 0, 0], [0, 0, 85], [0, 85, 170], [0, 170, 255], [85, 170, 255], [170, 255, 255], [255, 255, 255]],
+  },
+  geometry: {
+    code: 'GEO',
+    symmetry: 'vertical',
+    minDensity: 0.42,
+    palette: [[0, 0, 0], [85, 85, 85], [170, 170, 170], [255, 255, 255], [255, 85, 0], [255, 170, 0], [255, 255, 85]],
+  },
+  textile: {
+    code: 'TXT',
+    symmetry: 'horizontal',
+    minDensity: 0.44,
+    palette: [[0, 0, 0], [85, 0, 85], [170, 0, 170], [255, 0, 170], [255, 85, 170], [255, 170, 255], [255, 255, 255]],
+  },
+};
 const BOTTOM_EPSILON = 3;
 const LOAD_INTENT_THRESHOLD = 220;
 const INITIAL_BATCHES = window.matchMedia('(max-width: 640px)').matches ? 2 : 3;
@@ -260,11 +292,29 @@ function rememberCode(code) {
   if (recentCodes.length > RECENT_LIMIT) recentCodeSet.delete(recentCodes.shift());
 }
 
-function chooseCode() {
-  let code = Math.floor(Math.random() * modelInfo.perClass);
+function availableStyles() {
+  return modelInfo?.styles?.length ? modelInfo.styles : DEFAULT_STYLES;
+}
+
+function styleProfile(style) {
+  return STYLE_PROFILES[style] || STYLE_PROFILES.geometry;
+}
+
+function styleForSeed(seed) {
+  const styles = availableStyles();
+  const row = Math.floor(seed / BATCH_SIZE);
+  const column = seed % BATCH_SIZE;
+  return styles[(column + row * 2) % styles.length];
+}
+
+function chooseCode(style) {
+  const range = modelInfo.styleRanges?.[style];
+  const start = range ? range[0] : 0;
+  const end = range ? range[1] : modelInfo.perClass;
+  let code = start + Math.floor(Math.random() * Math.max(1, end - start));
   let attempts = 0;
   while (recentCodeSet.has(code) && attempts < 12) {
-    code = Math.floor(Math.random() * modelInfo.perClass);
+    code = start + Math.floor(Math.random() * Math.max(1, end - start));
     attempts += 1;
   }
   rememberCode(code);
@@ -297,7 +347,7 @@ function drawSkeleton(canvas, seed) {
   context.putImageData(image, 0, 0);
 }
 
-function createReadout(seed, symmetry) {
+function createReadout(seed, symmetry, style) {
   const readout = document.createElement('div');
   readout.className = 'tile-readout';
   readout.setAttribute('aria-hidden', 'true');
@@ -306,6 +356,7 @@ function createReadout(seed, symmetry) {
     ['ID', String(seed).padStart(4, '0')],
     ['PX', '24×24'],
     ['SYM', symmetry === 'vertical' ? 'V' : 'H'],
+    ['MOT', styleProfile(style).code],
     ['PAL', '64'],
     ['BYR', '8×8'],
   ];
@@ -333,12 +384,14 @@ function createTile(seed) {
   element.setAttribute('aria-label', 'Generating pixel pattern');
   element.dataset.state = 'generating';
 
-  const symmetry = SYMMETRIES[seed % SYMMETRIES.length];
+  const style = styleForSeed(seed);
+  const symmetry = styleProfile(style).symmetry;
   element.dataset.symmetry = symmetry;
+  element.dataset.style = style;
 
   const skeleton = createCanvas('skeleton-canvas');
   const output = createCanvas('output-canvas');
-  const readout = createReadout(seed, symmetry);
+  const readout = createReadout(seed, symmetry, style);
   drawSkeleton(skeleton, seed);
   element.append(skeleton, output, readout.readout);
 
@@ -350,6 +403,7 @@ function createTile(seed) {
     readout: readout.readout,
     readoutCode: readout.code,
     seed,
+    style,
     symmetry,
     revealOrder: createRevealOrder(seed),
     image: null,
@@ -376,16 +430,6 @@ function isEdge(position) {
   return x === 0 || x === SIZE - 1 || y === 0 || y === SIZE - 1;
 }
 
-const backgroundPairs = [
-  [[0, 0, 85], [0, 0, 170]],
-  [[85, 0, 0], [170, 0, 0]],
-  [[0, 85, 0], [0, 170, 0]],
-  [[85, 0, 85], [170, 0, 170]],
-  [[85, 85, 0], [170, 170, 0]],
-  [[0, 85, 85], [0, 170, 170]],
-  [[85, 85, 85], [170, 170, 170]],
-];
-
 function paletteIndex(colour) {
   return modelInfo.palette.findIndex((candidate) => (
     candidate[0] === colour[0]
@@ -394,45 +438,119 @@ function paletteIndex(colour) {
   ));
 }
 
-function densifyPixels(pixels, symmetry, seed) {
-  const result = pixels.slice();
-  const keepBlackFrame = seed % 4 === 0;
-  const counts = new Map();
+function harmonyIndices(style) {
+  return styleProfile(style).palette
+    .map((colour) => paletteIndex(colour))
+    .filter((index) => index >= 0);
+}
 
-  pixels.forEach((colour) => {
-    if (colour !== 0) counts.set(colour, (counts.get(colour) || 0) + 1);
+function pixelLuminance(index) {
+  const colour = modelInfo.palette[index] || [0, 0, 0];
+  return (colour[0] * 0.2126 + colour[1] * 0.7152 + colour[2] * 0.0722) / 255;
+}
+
+function harmonyColour(index, style, position, seed) {
+  if (index === 0) return 0;
+  const harmony = harmonyIndices(style);
+  if (harmony.length < 2) return index;
+  const brightness = pixelLuminance(index);
+  const bayer = bayer8[(Math.floor(position / SIZE) + seed) % 8][(position + seed * 3) % 8];
+  const level = Math.max(
+    1,
+    Math.min(harmony.length - 1, Math.round(brightness * (harmony.length - 1)) + (bayer < 12 ? 1 : 0)),
+  );
+  return harmony[level];
+}
+
+function fillPriority(style, x, y, seed, near, bounds) {
+  const threshold = bayer8[(y + seed) % 8][(x + seed * 3) % 8];
+  const centerX = Math.abs(x - 11.5);
+  const centerY = Math.abs(y - 11.5);
+  const radial = Math.sqrt(centerX * centerX + centerY * centerY);
+  const inside = x >= bounds.minX && x <= bounds.maxX && y >= bounds.minY && y <= bounds.maxY;
+
+  if (style === 'fauna') {
+    return (inside ? 22 : 0) + (near ? 34 : 0) + (radial < 8 ? 10 : 0) + (threshold < 10 ? 8 : 0);
+  }
+  if (style === 'botanical') {
+    const petal = Math.abs(centerX - centerY) < 2.5 || radial < 4;
+    return (petal ? 30 : 0) + (near ? 28 : 0) + (threshold < 16 ? 10 : 0);
+  }
+  if (style === 'terrain') {
+    const band = Math.abs((y % 6) - 2) < 2;
+    return (band ? 24 : 0) + (near ? 28 : 0) + (y > 11 ? 10 : 0) + (threshold < 14 ? 8 : 0);
+  }
+  if (style === 'geometry') {
+    const ring = Math.abs((centerX + centerY) % 6 - 2) < 1.8;
+    const diagonal = (x + y + seed) % 5 < 2;
+    return (ring ? 26 : 0) + (diagonal ? 14 : 0) + (near ? 30 : 0) + (threshold < 18 ? 8 : 0);
+  }
+  const checker = (Math.floor(x / 3) + Math.floor(y / 3) + seed) % 2 === 0;
+  return (checker ? 24 : 0) + (near ? 32 : 0) + (threshold < 20 ? 8 : 0);
+}
+
+function densifyPixels(pixels, symmetry, seed, style) {
+  const result = pixels.slice();
+  const profile = styleProfile(style);
+  const harmony = harmonyIndices(style);
+  const keepBlackFrame = seed % 5 === 0;
+  const bounds = { minX: SIZE, minY: SIZE, maxX: -1, maxY: -1 };
+
+  pixels.forEach((colour, position) => {
+    if (colour === 0) return;
+    const x = position % SIZE;
+    const y = Math.floor(position / SIZE);
+    bounds.minX = Math.min(bounds.minX, x);
+    bounds.maxX = Math.max(bounds.maxX, x);
+    bounds.minY = Math.min(bounds.minY, y);
+    bounds.maxY = Math.max(bounds.maxY, y);
+    result[position] = harmonyColour(colour, style, position, seed);
   });
 
-  let dominant = 1;
-  let dominantCount = 0;
-  counts.forEach((count, colour) => {
-    if (count > dominantCount) {
-      dominant = colour;
-      dominantCount = count;
+  if (bounds.maxX < 0) {
+    bounds.minX = 4;
+    bounds.maxX = 19;
+    bounds.minY = 4;
+    bounds.maxY = 19;
+  }
+
+  const pairs = symmetryOrders[symmetry];
+  const candidates = [];
+  pairs.forEach(({ position, mirror }) => {
+    if (pixels[position] !== 0 || pixels[mirror] !== 0) return;
+    const x = position % SIZE;
+    const y = Math.floor(position / SIZE);
+    if (keepBlackFrame && (isEdge(position) || isEdge(mirror))) return;
+    const near = [
+      position - 1, position + 1, position - SIZE, position + SIZE,
+    ].some((neighbour) => neighbour >= 0 && neighbour < PIXEL_COUNT && pixels[neighbour] !== 0);
+    const priority = fillPriority(style, x, y, seed, near, bounds);
+    candidates.push({ position, mirror, priority, x, y });
+    if (priority >= 38 || (near && priority >= 28)) {
+      const accent = harmony[1 + ((x + y + seed) % Math.max(1, harmony.length - 1))] || harmony[1] || 1;
+      result[position] = accent;
+      result[mirror] = accent;
     }
   });
 
-  const dominantColour = modelInfo.palette[dominant] || [85, 85, 85];
-  const hue = dominantColour.indexOf(Math.max(...dominantColour));
-  const pair = backgroundPairs[(hue + seed) % backgroundPairs.length];
-  const base = Math.max(1, paletteIndex(pair[0]));
-  const accent = Math.max(1, paletteIndex(pair[1]));
-
-  symmetryOrders[symmetry].forEach(({ position, mirror }) => {
-    if (pixels[position] !== 0) return;
-    if (keepBlackFrame && isEdge(position)) return;
-    const x = position % SIZE;
-    const y = Math.floor(position / SIZE);
-    const threshold = bayer8[(y + seed) % 8][(x + seed * 3) % 8];
-    const colour = threshold < 8 ? accent : base;
-    result[position] = colour;
-    result[mirror] = result[position];
-  });
+  const minimum = Math.floor(PIXEL_COUNT * profile.minDensity);
+  let density = result.reduce((count, colour) => count + (colour !== 0 ? 1 : 0), 0);
+  candidates
+    .sort((left, right) => right.priority - left.priority || left.position - right.position)
+    .some(({ position, mirror, x, y }, index) => {
+      if (density >= minimum) return true;
+      if (result[position] !== 0 || result[mirror] !== 0) return false;
+      const accent = harmony[1 + ((index + seed + x + y) % Math.max(1, harmony.length - 1))] || harmony[1] || 1;
+      result[position] = accent;
+      result[mirror] = accent;
+      density += position === mirror ? 1 : 2;
+      return false;
+    });
 
   return result;
 }
 
-function readPixels(logits, imageIndex, symmetry, seed) {
+function readPixels(logits, imageIndex, symmetry, seed, style) {
   const pixels = new Uint8Array(PIXEL_COUNT);
   const imageOffset = imageIndex * modelInfo.palette.length * PIXEL_COUNT;
   symmetryOrders[symmetry].forEach(({ position, mirror }) => {
@@ -448,7 +566,7 @@ function readPixels(logits, imageIndex, symmetry, seed) {
     pixels[position] = colour;
     pixels[mirror] = colour;
   });
-  return densifyPixels(pixels, symmetry, seed);
+  return densifyPixels(pixels, symmetry, seed, style);
 }
 
 function writePixel(image, position, colour) {
@@ -665,7 +783,7 @@ function animateBatch(tiles, images) {
 async function generatePatternBatch(tiles) {
   const latent = new Float32Array(BATCH_SIZE * modelInfo.latent);
   for (let index = 0; index < BATCH_SIZE; index += 1) {
-    const code = chooseCode();
+    const code = chooseCode(tiles[index].style);
     tiles[index].readoutCode.textContent = 'LAT ' + code.toString(16).toUpperCase().padStart(3, '0');
     const offset = code * modelInfo.latent;
     const targetOffset = index * modelInfo.latent;
@@ -685,6 +803,7 @@ async function generatePatternBatch(tiles) {
         index,
         tiles[index].symmetry,
         tiles[index].seed,
+        tiles[index].style,
       ),
     );
   } finally {

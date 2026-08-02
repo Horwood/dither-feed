@@ -20,11 +20,50 @@ from torch.utils.data import DataLoader, Dataset
 ROOT = Path(__file__).resolve().parents[1]
 DATA_URL = "https://huggingface.co/datasets/unstonio/pixelgpt-24x24-20k/resolve/main/data/train-00000-of-00001.parquet"
 DATA_PATH = ROOT / "data" / "train.parquet"
-CHARACTER_FAMILIES = {"01_animals", "02_fantasy_creatures", "03_people_and_characters", "11_machines_and_technology"}
 LATENT = 40
 COLORS = 64
-PATTERN_COUNT = 600
+PATTERN_COUNT = 1200
 EXPORT_BATCH = 4
+PATTERN_VARIANTS = 2
+PATTERN_SAMPLES_PER_STYLE = 4000
+
+# The source set is object-oriented rather than an ornament set.  These broad
+# buckets keep the export varied while still letting the latent vector carry
+# the source motif: fauna, botanical forms, terrain, geometry, and textile-like
+# repeats.  They are intentionally soft categories; every source still gets a
+# chance to become a pattern.
+STYLE_NAMES = ("fauna", "botanical", "terrain", "geometry", "textile")
+STYLE_FAMILIES = {
+    "fauna": {"01_animals", "02_fantasy_creatures", "03_people_and_characters"},
+    "botanical": {"04_plants_and_fungi"},
+    "terrain": {"16_nature_and_landscapes", "18_effects_and_celestial"},
+    "geometry": {
+        "11_machines_and_technology",
+        "12_science_and_medicine",
+        "14_places_and_structures",
+        "17_materials_and_components",
+        "19_symbols_and_documents",
+    },
+    "textile": {
+        "05_food_and_drink",
+        "06_containers_and_storage",
+        "07_clothing_and_accessories",
+        "08_treasure_magic_and_relics",
+        "09_tools_and_crafting",
+        "10_weapons_and_defenses",
+        "15_household_furniture_and_everyday",
+    },
+}
+BAYER8 = torch.tensor([
+    [0, 48, 12, 60, 3, 51, 15, 63],
+    [32, 16, 44, 28, 35, 19, 47, 31],
+    [8, 56, 4, 52, 11, 59, 7, 55],
+    [40, 24, 36, 20, 43, 27, 39, 23],
+    [2, 50, 14, 62, 1, 49, 13, 61],
+    [34, 18, 46, 30, 33, 17, 45, 29],
+    [10, 58, 6, 54, 9, 57, 5, 53],
+    [42, 26, 38, 22, 41, 25, 37, 21],
+], dtype=torch.long)
 
 
 def device() -> torch.device:
@@ -43,6 +82,10 @@ def tokens_from_bytes(image_bytes: bytes) -> torch.Tensor:
     return ((pixels[..., 0] // 64) * 16 + (pixels[..., 1] // 64) * 4 + pixels[..., 2] // 64).long()
 
 
+def rgb_to_token(rgb: list[int]) -> int:
+    return (int(rgb[0]) // 64) * 16 + (int(rgb[1]) // 64) * 4 + int(rgb[2]) // 64
+
+
 def tokens_to_image(tokens: torch.Tensor) -> torch.Tensor:
     red = (tokens // 16).float() / 3 * 2 - 1
     green = ((tokens // 4) % 4).float() / 3 * 2 - 1
@@ -50,29 +93,147 @@ def tokens_to_image(tokens: torch.Tensor) -> torch.Tensor:
     return torch.stack((red, green, blue))
 
 
-def repeat_tile(tokens: torch.Tensor) -> torch.Tensor:
-    tile = tokens[::2, ::2]
-    top = torch.cat((tile, tile.flip(-1)), dim=-1)
+def normalize_background(tokens: torch.Tensor, background: int) -> torch.Tensor:
+    """Collapse the dataset's near-black tile background to one clean token."""
+
+    result = tokens.clone()
+    result[result == background] = 0
+    return result
+
+
+def mirror_vertical(tokens: torch.Tensor, start: int) -> torch.Tensor:
+    half = tokens[:, start:start + 12]
+    return torch.cat((half, half.flip(-1)), dim=-1)
+
+
+def mirror_horizontal(tokens: torch.Tensor, start: int) -> torch.Tensor:
+    half = tokens[start:start + 12, :]
+    return torch.cat((half, half.flip(-2)), dim=-2)
+
+
+def rosette(tokens: torch.Tensor, start: int) -> torch.Tensor:
+    quarter = tokens[start:start + 12, start:start + 12]
+    top = torch.cat((quarter, quarter.flip(-1)), dim=-1)
     return torch.cat((top, top.flip(-2)), dim=-2)
+
+
+def diamond_repeat(tokens: torch.Tensor, start: int) -> torch.Tensor:
+    patch = tokens[start:start + 8, start:start + 8]
+    tile = torch.cat((patch, patch.flip(-1)), dim=-1)
+    tile = torch.cat((tile, tile.flip(-2)), dim=-2)
+    return tile.repeat((2, 2))[:24, :24]
+
+
+def woven_repeat(tokens: torch.Tensor, start: int) -> torch.Tensor:
+    vertical = mirror_vertical(tokens, start)
+    horizontal = mirror_horizontal(tokens, start)
+    yy, xx = torch.meshgrid(torch.arange(24), torch.arange(24), indexing="ij")
+    mask = ((xx // 3 + yy // 3 + start) % 2).bool()
+    return torch.where(mask, vertical, horizontal)
+
+
+def apply_dither(tokens: torch.Tensor, style: int, variant: int) -> torch.Tensor:
+    """Add a restrained field of pixels so motifs read as ornaments, not cutouts."""
+
+    result = tokens.clone()
+    foreground = result.ne(0)
+    yy, xx = torch.meshgrid(torch.arange(24), torch.arange(24), indexing="ij")
+    threshold = BAYER8[(yy + style + variant) % 8, (xx * 3 + variant) % 8]
+    # Keep the added field sparse.  The browser applies the final palette
+    # harmony, so this only teaches the decoder to leave designed breathing
+    # marks around the main silhouette.
+    halo = (~foreground) & (threshold < (5 + style * 2))
+    if halo.any():
+        neighbours = (
+            torch.roll(foreground, 1, 0)
+            | torch.roll(foreground, -1, 0)
+            | torch.roll(foreground, 1, 1)
+            | torch.roll(foreground, -1, 1)
+        )
+        accent = torch.where(foreground, result, torch.zeros_like(result))
+        accent = torch.roll(accent, 1 + variant % 2, dims=1)
+        result[halo & neighbours] = accent[halo & neighbours]
+    return result
+
+
+def pattern_tokens(tokens: torch.Tensor, background: int, style: int, variant: int) -> torch.Tensor:
+    """Turn an object sprite into a compact, repeatable motif."""
+
+    source = normalize_background(tokens, background)
+    starts = (0, 4, 6, 8)
+    start = starts[(variant + style) % len(starts)]
+    if style == 0:  # animalistic silhouettes and masks
+        result = mirror_vertical(source, start)
+    elif style == 1:  # petals, leaves, and rosettes
+        result = rosette(source, start)
+    elif style == 2:  # horizons, waves, and landscape bands
+        result = mirror_horizontal(source, start)
+    elif style == 3:  # diamonds, tiles, and engineered geometry
+        result = diamond_repeat(source, start)
+    else:  # woven, ethnic-like repeats with a little controlled variation
+        result = woven_repeat(source, start)
+    return apply_dither(result, style, variant)
 
 
 class PixelDataset(Dataset):
     def __init__(self, frame: pd.DataFrame) -> None:
         self.images = frame["image"].tolist()
-        self.characters = [i for i, family in enumerate(frame["family"]) if family in CHARACTER_FAMILIES]
+        self.families = frame["family"].tolist()
+        self.styles = [self.style_for_family(family) for family in self.families]
+        self.characters = [
+            i for i, family in enumerate(self.families)
+            if family in STYLE_FAMILIES["fauna"]
+        ]
+        style_sources = {
+            style: [index for index, source_style in enumerate(self.styles) if source_style == style]
+            for style in range(len(STYLE_NAMES))
+        }
+        self.patterns = []
+        for style in range(len(STYLE_NAMES)):
+            sources = style_sources[style]
+            for position in range(PATTERN_SAMPLES_PER_STYLE):
+                self.patterns.append((
+                    sources[position % len(sources)],
+                    style,
+                    position % PATTERN_VARIANTS,
+                ))
+        self.examples = []
+        # Interleave a small amount of the original sprite task with the
+        # pattern task.  It keeps the conditional latent space anchored while
+        # the exported decoder only uses the pattern branch.
+        for index in range(max(len(self.characters), len(self.patterns))):
+            if index < len(self.characters):
+                self.examples.append(("character", self.characters[index], -1, 0))
+            if index < len(self.patterns):
+                self.examples.append(("pattern", *self.patterns[index]))
 
     def __len__(self) -> int:
-        return len(self.characters) * 2
+        return len(self.examples)
 
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        is_pattern = index % 2 == 1
-        source_index = index // 2 % (len(self.images) if is_pattern else len(self.characters))
-        if not is_pattern:
-            source_index = self.characters[source_index]
-        tokens = tokens_from_bytes(self.images[source_index]["bytes"])
-        if is_pattern:
-            tokens = repeat_tile(tokens)
-        return tokens_to_image(tokens), torch.tensor(1 if is_pattern else 0, dtype=torch.long), tokens
+    @staticmethod
+    def style_for_family(family: str) -> int:
+        for style, name in enumerate(STYLE_NAMES):
+            if family in STYLE_FAMILIES[name]:
+                return style
+        return len(STYLE_NAMES) - 1
+
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        kind, source_index, style, variant = self.examples[index]
+        row = self.images[source_index]
+        tokens = tokens_from_bytes(row["bytes"])
+        if kind == "pattern":
+            tokens = pattern_tokens(
+                tokens,
+                rgb_to_token(row.get("tile_bg", [0, 0, 0])),
+                style,
+                variant,
+            )
+        return (
+            tokens_to_image(tokens),
+            torch.tensor(1 if kind == "pattern" else 0, dtype=torch.long),
+            tokens,
+            torch.tensor(style, dtype=torch.long),
+        )
 
 
 class ConditionalVAE(nn.Module):
@@ -128,20 +289,33 @@ class PatternDecoder(nn.Module):
 
 def export(model: ConditionalVAE, data: PixelDataset, target: torch.device) -> None:
     model.eval().to(target)
-    bank = []
-    loader = DataLoader(data, batch_size=128, shuffle=True, num_workers=0)
+    style_vectors: list[list[list[float]]] = [[] for _ in STYLE_NAMES]
+    loader = DataLoader(data, batch_size=128, shuffle=False, num_workers=0)
     with torch.no_grad():
-        for image, label, _tokens in loader:
+        for image, label, _tokens, style in loader:
             pattern_mask = label.eq(1)
             if not pattern_mask.any():
                 continue
             mu, _ = model.encode(image.to(target), label.to(target))
-            for vector in mu.cpu()[pattern_mask]:
-                if len(bank) < PATTERN_COUNT:
-                    bank.append(vector.tolist())
-            if len(bank) >= PATTERN_COUNT:
-                break
-    if len(bank) < PATTERN_COUNT:
+            for vector, style_id in zip(mu.cpu()[pattern_mask], style[pattern_mask]):
+                style_vectors[int(style_id)].append(vector.tolist())
+
+    per_style = PATTERN_COUNT // len(STYLE_NAMES)
+    remainder = PATTERN_COUNT % len(STYLE_NAMES)
+    bank = []
+    style_ranges = {}
+    for style, name in enumerate(STYLE_NAMES):
+        target_count = per_style + (1 if style < remainder else 0)
+        vectors = style_vectors[style]
+        if len(vectors) < target_count:
+            raise RuntimeError(
+                f"Expected {target_count} vectors for {name}, got {len(vectors)}"
+            )
+        start = len(bank)
+        bank.extend(vectors[:target_count])
+        style_ranges[name] = [start, len(bank)]
+
+    if len(bank) != PATTERN_COUNT:
         raise RuntimeError(f"Expected {PATTERN_COUNT} pattern vectors, got {len(bank)}")
     output_dir = ROOT / "public" / "model"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -161,8 +335,11 @@ def export(model: ConditionalVAE, data: PixelDataset, target: torch.device) -> N
         "perClass": PATTERN_COUNT,
         "batch": EXPORT_BATCH,
         "size": 24,
+        "styles": list(STYLE_NAMES),
+        "styleRanges": style_ranges,
+        "patternVariants": PATTERN_VARIANTS,
         "palette": palette,
-    }))
+    }, indent=2) + "\n")
     print(f"Exported pattern model ({(output_dir / 'garden-cvae.onnx').stat().st_size / 1_000_000:.2f} MB) and {len(bank[:PATTERN_COUNT])} latent codes")
 
 
@@ -183,7 +360,7 @@ def main(args: argparse.Namespace) -> None:
         print(f"Training on {target.type}: {len(data):,} examples")
         for epoch in range(1, args.epochs + 1):
             losses = []
-            for image, label, tokens in loader:
+            for image, label, tokens, _style in loader:
                 image, label, tokens = image.to(target), label.to(target), tokens.to(target)
                 logits, mu, logvar = model(image, label)
                 pixels = F.cross_entropy(logits, tokens)
