@@ -7,6 +7,9 @@ const PIXEL_COUNT = SIZE * SIZE;
 const BATCH_SIZE = 4;
 const REVEAL_MS = 1260;
 const SHADER_MS = 1350;
+const SPARK_LOADER_MIN_MS = 120;
+const SPARK_REVEAL_MS = 480;
+const GOLD_PARTICLE_LIMIT = 512;
 const NOISE = 0.065;
 const RECENT_LIMIT = 64;
 const DEFAULT_STYLES = ['fauna', 'botanical', 'terrain', 'geometry', 'textile'];
@@ -315,6 +318,57 @@ const shaderFragmentSource = `
   }
 `;
 
+const goldParticleVertexSource = `
+  precision highp float;
+
+  attribute vec2 particlePosition;
+  attribute float particleSize;
+  attribute float particleLife;
+  attribute float particleSeed;
+  uniform vec2 resolution;
+  uniform float pixelRatio;
+  uniform float time;
+  varying float life;
+  varying float shimmer;
+
+  void main() {
+    vec2 clip = vec2(
+      particlePosition.x / resolution.x * 2.0 - 1.0,
+      1.0 - particlePosition.y / resolution.y * 2.0
+    );
+    gl_Position = vec4(clip, 0.0, 1.0);
+    gl_PointSize = particleSize * pixelRatio
+      * (0.94 + sin(time * 9.0 + particleSeed * 17.0) * 0.08);
+    life = particleLife;
+    shimmer = 0.5 + 0.5 * sin(time * 8.5 + particleSeed * 23.0);
+  }
+`;
+
+const goldParticleFragmentSource = `
+  precision highp float;
+
+  varying float life;
+  varying float shimmer;
+
+  void main() {
+    vec2 point = gl_PointCoord - 0.5;
+    float body = length(vec2(point.x * 1.45, point.y * 0.72));
+    float halo = 1.0 - smoothstep(0.06, 0.52, body);
+    float core = 1.0 - smoothstep(0.0, 0.18, body);
+    float streak = (1.0 - smoothstep(0.0, 0.22, abs(point.x)))
+      * (1.0 - smoothstep(0.02, 0.5, abs(point.y)));
+    float fade = smoothstep(0.0, 0.16, life);
+
+    vec3 amber = vec3(1.0, 0.26, 0.015);
+    vec3 gold = vec3(1.0, 0.68, 0.06);
+    vec3 color = mix(amber, gold, 0.42 + shimmer * 0.48);
+    color += vec3(0.34, 0.12, 0.0) * core * 0.22;
+    float alpha = (halo * 0.52 + core * 0.95 + streak * 0.28) * fade;
+
+    gl_FragColor = vec4(color * (0.9 + shimmer * 0.42), alpha);
+  }
+`;
+
 const bayer8 = [
   [0, 48, 12, 60, 3, 51, 15, 63],
   [32, 16, 44, 28, 35, 19, 47, 31],
@@ -569,12 +623,16 @@ function createTile(seed) {
   };
 }
 
-function appendBatch() {
+function appendBatch(entryEffect = false) {
   const tiles = [];
   const fragment = document.createDocumentFragment();
-  const seed = feed.children.length;
+  const seed = feed.querySelectorAll('.pattern-tile').length;
   for (let index = 0; index < BATCH_SIZE; index += 1) {
     const tile = createTile(seed + index);
+    if (entryEffect) {
+      tile.element.dataset.entry = 'sparks';
+      tile.element.setAttribute('aria-hidden', 'true');
+    }
     tiles.push(tile);
     fragment.append(tile.element);
   }
@@ -831,7 +889,8 @@ function drawFrame(tile, pixels, image, count) {
   const end = Math.min(count, PIXEL_COUNT);
   for (let index = start; index < end; index += 1) {
     const position = tile.revealOrder[index];
-    const colour = modelInfo.palette[pixels[position]];
+    if (!Number.isInteger(position)) continue;
+    const colour = modelInfo.palette[pixels?.[position] ?? 0] || modelInfo.palette[0];
     writePixel(image, position, colour);
   }
   if (end !== start) {
@@ -979,18 +1038,306 @@ function startShaderBurst(element, sourceCanvas) {
   const startedAt = performance.now();
   const animate = (now) => {
     if (disposed) return;
-    render(Math.min(1, (now - startedAt) / SHADER_MS));
-    if (disposed) return;
-    if (now - startedAt < SHADER_MS) {
-      animationId = window.requestAnimationFrame(animate);
-    } else {
+    const elapsed = now - startedAt;
+    if (elapsed >= SHADER_MS) {
       dispose();
+      return;
     }
+    render(elapsed / SHADER_MS);
+    if (disposed) return;
+    animationId = window.requestAnimationFrame(animate);
   };
 
   animationId = window.requestAnimationFrame(animate);
 
   return { dispose };
+}
+
+function wait(duration) {
+  return new Promise((resolve) => window.setTimeout(resolve, duration));
+}
+
+function createGoldParticleField() {
+  if (reducedMotion.matches) return null;
+
+  const canvas = document.createElement('canvas');
+  canvas.className = 'gold-particle-field';
+  canvas.setAttribute('aria-hidden', 'true');
+  document.body.append(canvas);
+
+  const gl = canvas.getContext('webgl', {
+    alpha: true,
+    antialias: false,
+    depth: false,
+    premultipliedAlpha: false,
+    preserveDrawingBuffer: false,
+  });
+  if (!gl) {
+    canvas.remove();
+    return null;
+  }
+
+  const particles = [];
+  const randomBySeed = new Map();
+  let vertexShader;
+  let fragmentShader;
+  let program;
+  let buffer;
+  let animationId = 0;
+  let disposed = false;
+  let emissionOpen = true;
+  let viewportWidth = window.innerWidth;
+  let viewportHeight = window.innerHeight;
+  let pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+  const bornAt = performance.now();
+  let previousFrame = bornAt;
+
+  const resize = () => {
+    viewportWidth = window.innerWidth;
+    viewportHeight = window.innerHeight;
+    pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.max(1, Math.round(viewportWidth * pixelRatio));
+    canvas.height = Math.max(1, Math.round(viewportHeight * pixelRatio));
+    gl.viewport(0, 0, canvas.width, canvas.height);
+  };
+
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    window.cancelAnimationFrame(animationId);
+    window.removeEventListener('resize', resize);
+    if (buffer) gl.deleteBuffer(buffer);
+    if (program) gl.deleteProgram(program);
+    if (vertexShader) gl.deleteShader(vertexShader);
+    if (fragmentShader) gl.deleteShader(fragmentShader);
+    canvas.remove();
+    const loseContext = gl.getExtension('WEBGL_lose_context');
+    if (loseContext) loseContext.loseContext();
+  };
+
+  try {
+    vertexShader = compileShader(gl, gl.VERTEX_SHADER, goldParticleVertexSource);
+    fragmentShader = compileShader(gl, gl.FRAGMENT_SHADER, goldParticleFragmentSource);
+    program = gl.createProgram();
+    gl.attachShader(program, vertexShader);
+    gl.attachShader(program, fragmentShader);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      throw new Error(gl.getProgramInfoLog(program) || 'Unknown gold particle shader link error');
+    }
+
+    buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    const stride = 5 * Float32Array.BYTES_PER_ELEMENT;
+    const position = gl.getAttribLocation(program, 'particlePosition');
+    const size = gl.getAttribLocation(program, 'particleSize');
+    const life = gl.getAttribLocation(program, 'particleLife');
+    const seed = gl.getAttribLocation(program, 'particleSeed');
+    gl.enableVertexAttribArray(position);
+    gl.vertexAttribPointer(position, 2, gl.FLOAT, false, stride, 0);
+    gl.enableVertexAttribArray(size);
+    gl.vertexAttribPointer(size, 1, gl.FLOAT, false, stride, 8);
+    gl.enableVertexAttribArray(life);
+    gl.vertexAttribPointer(life, 1, gl.FLOAT, false, stride, 12);
+    gl.enableVertexAttribArray(seed);
+    gl.vertexAttribPointer(seed, 1, gl.FLOAT, false, stride, 16);
+    gl.useProgram(program);
+    gl.clearColor(0, 0, 0, 0);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+  } catch (error) {
+    console.warn('dither-feed: gold particle shader unavailable', error);
+    dispose();
+    return null;
+  }
+
+  const resolutionLocation = gl.getUniformLocation(program, 'resolution');
+  const ratioLocation = gl.getUniformLocation(program, 'pixelRatio');
+  const timeLocation = gl.getUniformLocation(program, 'time');
+
+  const render = (now) => {
+    if (disposed) return;
+    const delta = Math.max(0, Math.min(0.04, (now - previousFrame) / 1000));
+    previousFrame = now;
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    for (let index = particles.length - 1; index >= 0; index -= 1) {
+      const particle = particles[index];
+      particle.age += delta;
+      particle.velocityY += particle.gravity * delta;
+      particle.x += (
+        particle.velocityX
+        + Math.sin(particle.age * 10 + particle.seed * 13) * 18
+      ) * delta;
+      particle.y += particle.velocityY * delta;
+      if (
+        particle.y > viewportHeight + particle.size * 4
+        || particle.age >= particle.maxLife
+      ) {
+        particles.splice(index, 1);
+      }
+    }
+
+    if (particles.length) {
+      const data = new Float32Array(particles.length * 5);
+      particles.forEach((particle, index) => {
+        const offset = index * 5;
+        data[offset] = particle.x;
+        data[offset + 1] = particle.y;
+        data[offset + 2] = particle.size;
+        data[offset + 3] = Math.max(0, 1 - particle.age / particle.maxLife);
+        data[offset + 4] = particle.seed;
+      });
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
+      gl.useProgram(program);
+      gl.uniform2f(resolutionLocation, viewportWidth, viewportHeight);
+      gl.uniform1f(ratioLocation, pixelRatio);
+      gl.uniform1f(timeLocation, (now - bornAt) / 1000);
+      gl.drawArrays(gl.POINTS, 0, particles.length);
+    }
+
+    if (emissionOpen || particles.length) {
+      animationId = window.requestAnimationFrame(render);
+    } else {
+      dispose();
+    }
+  };
+
+  resize();
+  window.addEventListener('resize', resize);
+  animationId = window.requestAnimationFrame(render);
+
+  return {
+    emit(tile, pixels, start, end) {
+      if (disposed || !emissionOpen || particles.length >= GOLD_PARTICLE_LIMIT) return;
+      const bounds = tile.output.getBoundingClientRect();
+      if (bounds.width <= 0 || bounds.height <= 0) return;
+      let random = randomBySeed.get(tile.seed);
+      if (!random) {
+        random = makeSeededRandom(
+          SESSION_SEED ^ Math.imul(tile.seed + 1, 2246822519),
+        );
+        randomBySeed.set(tile.seed, random);
+      }
+      const pixelWidth = bounds.width / SIZE;
+      const pixelHeight = bounds.height / SIZE;
+      for (let index = start; index < end; index += 1) {
+        if (particles.length >= GOLD_PARTICLE_LIMIT) break;
+        const position = tile.revealOrder[index];
+        if (!Number.isInteger(position)) continue;
+        const colour = modelInfo.palette[pixels?.[position] ?? 0];
+        if (!colour || Math.max(...colour) < 48 || random() > 0.18) continue;
+        const amount = random() > 0.9 ? 2 : 1;
+        for (let spark = 0; spark < amount; spark += 1) {
+          if (particles.length >= GOLD_PARTICLE_LIMIT) break;
+          particles.push({
+            x: bounds.left + ((position % SIZE) + 0.5) * pixelWidth
+              + (random() - 0.5) * pixelWidth * 0.7,
+            y: bounds.top + (Math.floor(position / SIZE) + 0.5) * pixelHeight
+              + (random() - 0.5) * pixelHeight * 0.5,
+            velocityX: (random() - 0.5) * 82,
+            velocityY: 76 + random() * 122,
+            gravity: 520 + random() * 360,
+            age: 0,
+            maxLife: 2.4 + random() * 0.8,
+            size: 8.4 + random() * 11.6,
+            seed: random(),
+          });
+        }
+      }
+    },
+    finishEmission() {
+      emissionOpen = false;
+    },
+    dispose,
+  };
+}
+
+function bringBatchIntoView() {
+  window.requestAnimationFrame(() => {
+    terminalScroll.scrollTo({
+      top: Math.max(0, terminalScroll.scrollHeight - terminalScroll.clientHeight),
+      behavior: reducedMotion.matches ? 'auto' : 'smooth',
+    });
+  });
+}
+
+function clearBatchEntry(tiles) {
+  tiles.forEach((tile) => {
+    delete tile.element.dataset.entry;
+    tile.element.removeAttribute('aria-hidden');
+  });
+}
+
+function drawCompleteBatch(tiles, images) {
+  tiles.forEach((tile, index) => {
+    tile.image = tile.context.createImageData(SIZE, SIZE);
+    drawFrame(tile, images[index], tile.image, PIXEL_COUNT);
+  });
+}
+
+function markBatchReady(tiles, withWave = true) {
+  tiles.forEach((tile, index) => {
+    tile.skeleton.remove();
+    tile.element.setAttribute('aria-label', 'Generated pixel pattern ' + (index + 1));
+    tile.element.removeAttribute('aria-hidden');
+    tile.element.dataset.state = 'ready';
+    tile.image = null;
+    if (withWave) startShaderBurst(tile.element, tile.output);
+  });
+  generatedCount += tiles.length;
+  updateLiveStatus('ready');
+}
+
+function animateGoldParticleBatch(tiles, images) {
+  if (reducedMotion.matches) {
+    drawCompleteBatch(tiles, images);
+    clearBatchEntry(tiles);
+    markBatchReady(tiles);
+    return Promise.resolve();
+  }
+
+  const imageBuffers = tiles.map((tile) => {
+    tile.image = tile.context.createImageData(SIZE, SIZE);
+    return tile.image;
+  });
+  const particleField = createGoldParticleField();
+  tiles.forEach((tile) => {
+    tile.element.dataset.entry = 'revealing';
+  });
+
+  return new Promise((resolve) => {
+    const startedAt = performance.now();
+
+    const finish = () => {
+      clearBatchEntry(tiles);
+      markBatchReady(tiles);
+      particleField?.finishEmission();
+      resolve();
+    };
+
+    const frame = (now) => {
+      const elapsed = Math.max(0, now - startedAt);
+      const progress = Math.max(0, Math.min(1, elapsed / SPARK_REVEAL_MS));
+      const eased = 1 - Math.pow(1 - progress, 2.35);
+
+      tiles.forEach((tile, index) => {
+        const start = tile.revealed;
+        const count = Math.floor(eased * tile.revealOrder.length);
+        drawFrame(tile, images[index], imageBuffers[index], count);
+        particleField?.emit(tile, images[index], start, tile.revealed);
+      });
+
+      if (progress < 1) {
+        window.requestAnimationFrame(frame);
+        return;
+      }
+      finish();
+    };
+
+    window.requestAnimationFrame(frame);
+  });
 }
 
 function animateBatch(tiles, images) {
@@ -1002,15 +1349,7 @@ function animateBatch(tiles, images) {
     const start = performance.now();
 
     const finish = () => {
-      tiles.forEach((tile, index) => {
-        tile.skeleton.remove();
-        tile.element.setAttribute('aria-label', 'Generated pixel pattern ' + (index + 1));
-        tile.element.dataset.state = 'ready';
-        tile.image = null;
-        startShaderBurst(tile.element, tile.output);
-      });
-      generatedCount += tiles.length;
-      updateLiveStatus('ready');
+      markBatchReady(tiles);
       resolve();
     };
 
@@ -1083,14 +1422,23 @@ function showError(error) {
   finishBoot(true);
 }
 
-async function loadMore() {
+async function loadMore({ entryEffect = false } = {}) {
   if (loading || blocked || !session) return;
   loading = true;
   updateLiveStatus('synth');
-  const tiles = appendBatch();
+  const tiles = appendBatch(entryEffect);
+  if (entryEffect) bringBatchIntoView();
+  else clearBatchEntry(tiles);
   try {
-    const images = await generatePatternBatch(tiles);
-    await animateBatch(tiles, images);
+    const generation = generatePatternBatch(tiles);
+    const images = entryEffect
+      ? (await Promise.all([generation, wait(SPARK_LOADER_MIN_MS)]))[0]
+      : await generation;
+    if (entryEffect) {
+      await animateGoldParticleBatch(tiles, images);
+    } else {
+      await animateBatch(tiles, images);
+    }
   } catch (error) {
     tiles.forEach((tile) => tile.element.remove());
     showError(error);
@@ -1114,7 +1462,7 @@ function requestMore() {
     || bottomIntent < LOAD_INTENT_THRESHOLD
   ) return;
   bottomIntent = 0;
-  loadMore();
+  loadMore({ entryEffect: true });
 }
 
 async function loadModel() {
