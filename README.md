@@ -43,7 +43,7 @@ Each session carries a `seed` query parameter. When the page opens without one, 
 https://horwood.github.io/dither-feed/?seed=7F3A19C2
 ```
 
-The seed is the quiet run identifier shown in the terminal status line and in each tile's technical readout. It does not leave the browser or require a server-side session.
+The seed is the quiet run identifier shown in the terminal status line and in each tile's technical readout. It is resolved locally in the browser; no account or server-side session is involved.
 
 ## How a pattern is made
 
