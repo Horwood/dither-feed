@@ -35,6 +35,16 @@ Every group contains four original variations. Scroll to request the next group,
 
 The page does not need a server-side generation endpoint. After the model assets have loaded, inference and rendering happen in the browser.
 
+## Reproducible sessions
+
+Each session carries a `seed` query parameter. When the page opens without one, it creates a session seed and writes it into the address bar. Copying that URL lets someone else open the same deterministic latent choices, symmetry, palette treatment, and initial feed sequence.
+
+```text
+https://horwood.github.io/dither-feed/?seed=7F3A19C2
+```
+
+The seed is the quiet run identifier shown in the terminal status line and in each tile's technical readout. It does not leave the browser or require a server-side session.
+
 ## How a pattern is made
 
 ```text

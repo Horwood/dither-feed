@@ -54,7 +54,51 @@ const SECTOR_DITHER = 1;
 const SECTOR_ECHO = 2;
 const SECTOR_CUT = 3;
 const SECTOR_LINE = 4;
-const STYLE_OFFSET = Math.floor(Math.random() * DEFAULT_STYLES.length);
+
+function hashSeed(value) {
+  let hash = 2166136261;
+  for (const character of String(value)) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function randomSeed() {
+  const values = new Uint32Array(1);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(values);
+    return values[0] >>> 0;
+  }
+  return Math.floor(Math.random() * 0x100000000) >>> 0;
+}
+
+function parseSeed(value) {
+  const normalized = String(value).trim();
+  if (/^0x[\da-f]+$/i.test(normalized)) return Number.parseInt(normalized, 16) >>> 0;
+  if (/^\d+$/.test(normalized)) return Number.parseInt(normalized, 10) >>> 0;
+  if (/^[\da-f]+$/i.test(normalized)) return Number.parseInt(normalized, 16) >>> 0;
+  return hashSeed(normalized);
+}
+
+function formatSeed(seed) {
+  return (seed >>> 0).toString(16).toUpperCase().padStart(8, '0');
+}
+
+const requestedSeed = new URL(window.location.href).searchParams.get('seed');
+const SESSION_SEED = requestedSeed === null ? randomSeed() : parseSeed(requestedSeed);
+
+function syncSeedUrl() {
+  const url = new URL(window.location.href);
+  url.searchParams.set('seed', formatSeed(SESSION_SEED));
+  const nextLocation = url.pathname + url.search + url.hash;
+  const currentLocation = window.location.pathname + window.location.search + window.location.hash;
+  if (nextLocation !== currentLocation) window.history.replaceState(null, '', nextLocation);
+}
+
+syncSeedUrl();
+
+const STYLE_OFFSET = SESSION_SEED % DEFAULT_STYLES.length;
 const BOTTOM_EPSILON = 3;
 const LOAD_INTENT_THRESHOLD = 220;
 const INITIAL_BATCHES = window.matchMedia('(max-width: 640px)').matches ? 2 : 3;
@@ -68,7 +112,11 @@ const bootProgressBar = document.querySelector('#boot-progress-bar');
 const terminalLiveState = document.querySelector('#terminal-live-state');
 const terminalLiveCount = document.querySelector('#terminal-live-count');
 const terminalLiveRate = document.querySelector('#terminal-live-rate');
+const terminalLiveRun = document.querySelector('#terminal-live-run');
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+const terminalShell = document.querySelector('.terminal-shell');
+if (terminalShell) terminalShell.dataset.seed = formatSeed(SESSION_SEED);
 
 let session;
 let modelInfo;
@@ -102,7 +150,7 @@ function liveStateLabel(state) {
 }
 
 function updateLiveStatus(state) {
-  if (!terminalLiveState || !terminalLiveCount || !terminalLiveRate) return;
+  if (!terminalLiveState || !terminalLiveCount || !terminalLiveRate || !terminalLiveRun) return;
   const currentState = state || (blocked ? 'error' : loading ? 'synth' : session ? 'ready' : 'boot');
   const elapsed = Math.max(1, (performance.now() - liveStartedAt) / 1000);
   const rate = generatedCount / elapsed;
@@ -110,6 +158,7 @@ function updateLiveStatus(state) {
   terminalLiveState.dataset.state = currentState;
   terminalLiveCount.textContent = 'GEN ' + String(generatedCount).padStart(4, '0');
   terminalLiveRate.textContent = 'RATE ' + rate.toFixed(1) + '/S';
+  terminalLiveRun.textContent = 'RUN ' + formatSeed(SESSION_SEED);
 }
 
 function startLiveStatus() {
@@ -322,11 +371,11 @@ function assertResponse(response, path) {
   return response;
 }
 
-function gaussian() {
+function gaussian(random = Math.random) {
   let one = 0;
   let two = 0;
-  while (one === 0) one = Math.random();
-  while (two === 0) two = Math.random();
+  while (one === 0) one = random();
+  while (two === 0) two = random();
   return Math.sqrt(-2 * Math.log(one)) * Math.cos(2 * Math.PI * two);
 }
 
@@ -402,7 +451,7 @@ function styleForSeed(seed) {
   return styles[(column + row * 2 + STYLE_OFFSET) % styles.length];
 }
 
-function chooseCode(style) {
+function chooseCode(style, seed) {
   const range = modelInfo.styleRanges?.[style];
   const start = range ? range[0] : 0;
   const end = range ? range[1] : modelInfo.perClass;
@@ -415,10 +464,13 @@ function chooseCode(style) {
     { length: Math.max(1, end - start) },
     (_, index) => start + index,
   );
-  let code = candidates[Math.floor(Math.random() * candidates.length)];
+  const random = makeSeededRandom(
+    SESSION_SEED ^ hashSeed(style || '') ^ Math.imul(seed + 1, 2654435761),
+  );
+  let code = candidates[Math.floor(random() * candidates.length)];
   let attempts = 0;
   while (recentCodeSet.has(code) && attempts < 12) {
-    code = candidates[Math.floor(Math.random() * candidates.length)];
+    code = candidates[Math.floor(random() * candidates.length)];
     attempts += 1;
   }
   rememberCode(code);
@@ -458,6 +510,7 @@ function createReadout(seed, symmetry, style) {
 
   const entries = [
     ['ID', String(seed).padStart(4, '0')],
+    ['RUN', formatSeed(SESSION_SEED).slice(0, 4)],
     ['PX', '24×24'],
     ['SYM', symmetry === 'vertical' ? 'V' : 'H'],
     ['MOT', styleProfile(style).code],
@@ -982,13 +1035,19 @@ async function generatePatternBatch(tiles) {
   const latent = new Float32Array(BATCH_SIZE * modelInfo.latent);
   const variationSeeds = new Uint32Array(BATCH_SIZE);
   for (let index = 0; index < BATCH_SIZE; index += 1) {
-    const code = chooseCode(tiles[index].style);
+    const code = chooseCode(tiles[index].style, tiles[index].seed);
     tiles[index].readoutCode.textContent = 'LAT ' + code.toString(16).toUpperCase().padStart(3, '0');
-    variationSeeds[index] = (tiles[index].seed + code * 7919) >>> 0;
+    variationSeeds[index] = (
+      SESSION_SEED
+      ^ Math.imul(tiles[index].seed + 1, 2654435761)
+      ^ Math.imul(code + 1, 7919)
+    ) >>> 0;
+    const variationRandom = makeSeededRandom(variationSeeds[index] ^ 0xA53C9E1B);
     const offset = code * modelInfo.latent;
     const targetOffset = index * modelInfo.latent;
     for (let dimension = 0; dimension < modelInfo.latent; dimension += 1) {
-      latent[targetOffset + dimension] = latentBank[offset + dimension] + gaussian() * NOISE;
+      latent[targetOffset + dimension] = latentBank[offset + dimension]
+        + gaussian(variationRandom) * NOISE;
     }
   }
 

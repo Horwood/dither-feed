@@ -261,6 +261,10 @@ body {
   color: #647268;
 }
 
+.terminal-live-run {
+  color: #748679;
+}
+
 .terminal-live-separator {
   color: #3f4d42;
 }
@@ -408,7 +412,9 @@ body {
   .terminal-line { padding: 0 10px; }
   .terminal-live-status { margin-left: auto; gap: 5px; font-size: 8px; }
   .terminal-live-rate,
-  .terminal-live-rate-separator { display: none; }
+  .terminal-live-rate-separator,
+  .terminal-live-run,
+  .terminal-live-run-separator { display: none; }
   .feed {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
